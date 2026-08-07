@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
@@ -36,6 +37,17 @@ import (
 	"github.com/apache/yunikorn-scheduler-interface/lib/go/si"
 )
 
+// allocationSeqCounter hands out a strictly increasing sequence number to every Allocation at
+// construction time. It is used solely to break (priority, createTime) ties in Allocation.LessThan
+// with a strict total order - see the comment on LessThan for why this is required.
+var allocationSeqCounter atomic.Int64
+
+// nextAllocationSeq returns a new, unique, strictly increasing sequence number. Call this exactly
+// once per Allocation at construction, in every function that builds an Allocation.
+func nextAllocationSeq() int64 {
+	return allocationSeqCounter.Add(1)
+}
+
 type Allocation struct {
 	// Read-only fields
 	allocationKey     string
@@ -43,6 +55,7 @@ type Allocation struct {
 	taskGroupName     string    // task group this allocation belongs to
 	placeholder       bool      // is this a placeholder allocation
 	createTime        time.Time // the time this allocation was created (used in reservations)
+	creationSeq       int64     // monotonic sequence number assigned at construction; strict tiebreaker for LessThan
 	priority          int32
 	requiredNode      string
 	allowPreemptSelf  bool
@@ -136,6 +149,7 @@ func NewAllocationFromSI(alloc *si.Allocation) *Allocation {
 		allocatedResource: resources.NewResourceFromProto(alloc.ResourcePerAlloc),
 		tags:              CloneAllocationTags(alloc.AllocationTags),
 		createTime:        createTime,
+		creationSeq:       nextAllocationSeq(),
 		priority:          alloc.Priority,
 		placeholder:       alloc.Placeholder,
 		taskGroupName:     alloc.TaskGroupName,
@@ -536,13 +550,37 @@ func (a *Allocation) HasTriggeredPreemption() bool {
 	return a.preemptionTriggered
 }
 
-// LessThan compares two allocations by priority and then creation time.
+// LessThan compares two allocations by priority, then creation time, then creation sequence.
+// This MUST be a strict total order (irreflexive, asymmetric, transitive): sortedRequests
+// (sorted_asks.go) now removes an ask on allocate and re-inserts it on deallocate, so every ask
+// needs a defined slot to return to instead of one that depends on the rest of the slice.
+//
+// Direction: sortedRequests keeps the ask that should be attempted FIRST toward the front of the
+// slice (see tryAllocate/tryPlaceholderAllocate, which scan front-to-back). Higher priority sorts
+// to the front. For equal priority, an OLDER createTime sorts to the front (FIFO within a priority
+// band) - implemented by defining a newer createTime as "Less" via .After, so newer asks sort later.
+// The creation-sequence tiebreaker extends the same pattern: for equal priority AND equal
+// createTime a HIGHER (later-assigned) sequence number is "Less" and sorts later, so the ask
+// constructed first stays toward the front.
+//
+// Ties are the normal case, not an edge case: createTime arrives from the shim at whole-second
+// resolution, so a burst of pods shares one createTime. Without the sequence tiebreaker the
+// comparison is true in BOTH directions for a tie, which is not a strict weak ordering, and insert
+// then places a tied ask by slice contents rather than by the asks compared: the tail fast path
+// appends behind the tie-peers (FIFO), while the sort.Search path - taken whenever something
+// sorting strictly later is already present, e.g. a lower-priority ask - stops at the FIRST
+// tie-peer and inserts in front of the whole group (LIFO). No comparator can reproduce that, so
+// tie placement is necessarily normalized here: consistently arrival-order (FIFO), unchanged for
+// the dominant in-order burst and defined instead of position-dependent for the rest. The cases
+// are pinned in sorted_asks_ordering_test.go.
 func (a *Allocation) LessThan(other *Allocation) bool {
-	if a.priority == other.priority {
-		return a.createTime.After(other.createTime) || a.createTime.Equal(other.createTime)
+	if a.priority != other.priority {
+		return a.priority < other.priority
 	}
-
-	return a.priority < other.priority
+	if !a.createTime.Equal(other.createTime) {
+		return a.createTime.After(other.createTime)
+	}
+	return a.creationSeq > other.creationSeq
 }
 
 // SetSchedulingAttempted marks whether scheduling has been attempted at least once for this allocation.

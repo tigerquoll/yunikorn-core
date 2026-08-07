@@ -157,6 +157,79 @@ func TestRemoveWithSamePriorityAndTime(t *testing.T) {
 	assert.Assert(t, !askPresent(alloc3, sorted), "alloc3 should be removed")
 }
 
+// TestInsertRemoveReinsertStablePositionOnTie proves that the creation-sequence tiebreaker in
+// Allocation.LessThan gives sortedRequests a strict total order, so that an ask which is removed
+// (simulating allocate) and later re-inserted (simulating deallocate) lands back in EXACTLY the
+// same position within its (priority, createTime) tie-group. Without the tiebreaker a tie makes
+// LessThan return true in both directions, which is not a consistent order for sort.Search/the
+// fast path to rely on - a removed-then-reinserted tied ask could land anywhere in the tie-group.
+// See sorted_asks_ordering_test.go for the same properties on asks built through
+// NewAllocationFromSI, and for where this differs from the pre-optimization behaviour.
+func TestInsertRemoveReinsertStablePositionOnTie(t *testing.T) {
+	baseTime := time.Now()
+	alloc1 := &Allocation{
+		createTime:    baseTime,
+		priority:      10,
+		creationSeq:   1,
+		allocationKey: "alloc-1",
+	}
+	alloc2 := &Allocation{
+		createTime:    baseTime,
+		priority:      10,
+		creationSeq:   2,
+		allocationKey: "alloc-2",
+	}
+	alloc3 := &Allocation{
+		createTime:    baseTime,
+		priority:      10,
+		creationSeq:   3,
+		allocationKey: "alloc-3",
+	}
+
+	sorted := sortedRequests{}
+	// insert in arrival order
+	sorted.insert(alloc1)
+	sorted.insert(alloc2)
+	sorted.insert(alloc3)
+	assert.Equal(t, 3, len(sorted))
+	assert.Equal(t, "alloc-1", sorted[0].allocationKey, "expected arrival order front to back")
+	assert.Equal(t, "alloc-2", sorted[1].allocationKey, "expected arrival order front to back")
+	assert.Equal(t, "alloc-3", sorted[2].allocationKey, "expected arrival order front to back")
+
+	// allocate/deallocate cycle for the MIDDLE ask (alloc-2)
+	sorted.remove(alloc2)
+	assert.Equal(t, 2, len(sorted))
+	assert.Equal(t, "alloc-1", sorted[0].allocationKey)
+	assert.Equal(t, "alloc-3", sorted[1].allocationKey)
+	sorted.insert(alloc2)
+	assert.Equal(t, 3, len(sorted))
+	assert.Equal(t, "alloc-1", sorted[0].allocationKey, "alloc-2 should return to its original middle position")
+	assert.Equal(t, "alloc-2", sorted[1].allocationKey, "alloc-2 should return to its original middle position")
+	assert.Equal(t, "alloc-3", sorted[2].allocationKey, "alloc-2 should return to its original middle position")
+
+	// allocate/deallocate cycle for the FIRST ask (alloc-1)
+	sorted.remove(alloc1)
+	assert.Equal(t, 2, len(sorted))
+	assert.Equal(t, "alloc-2", sorted[0].allocationKey)
+	assert.Equal(t, "alloc-3", sorted[1].allocationKey)
+	sorted.insert(alloc1)
+	assert.Equal(t, 3, len(sorted))
+	assert.Equal(t, "alloc-1", sorted[0].allocationKey, "alloc-1 should return to the front")
+	assert.Equal(t, "alloc-2", sorted[1].allocationKey, "alloc-1 should return to the front")
+	assert.Equal(t, "alloc-3", sorted[2].allocationKey, "alloc-1 should return to the front")
+
+	// allocate/deallocate cycle for the LAST ask (alloc-3)
+	sorted.remove(alloc3)
+	assert.Equal(t, 2, len(sorted))
+	assert.Equal(t, "alloc-1", sorted[0].allocationKey)
+	assert.Equal(t, "alloc-2", sorted[1].allocationKey)
+	sorted.insert(alloc3)
+	assert.Equal(t, 3, len(sorted))
+	assert.Equal(t, "alloc-1", sorted[0].allocationKey, "alloc-3 should return to the back")
+	assert.Equal(t, "alloc-2", sorted[1].allocationKey, "alloc-3 should return to the back")
+	assert.Equal(t, "alloc-3", sorted[2].allocationKey, "alloc-3 should return to the back")
+}
+
 func askPresent(ask *Allocation, asks []*Allocation) bool {
 	for _, a := range asks {
 		if a.allocationKey == ask.allocationKey {
