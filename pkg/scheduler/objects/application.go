@@ -1151,11 +1151,25 @@ func (sa *Application) tryAllocate(headRoom *resources.Resource, allowPreemption
 	backoffThreshold := sa.queue.GetMaxAppUnschedAskBackoff()
 	// get all the requests from the app sorted in order
 	// LOAD-BEARING INVARIANT: sa.sortedRequests now holds only pending asks (item 2) and
-	// allocateAsk/deallocateAsk mutate it in place. This range is only safe to mutate mid-loop
-	// because every successful-allocation path below returns immediately instead of continuing the
-	// loop. Do NOT add a "continue" after a successful allocateAsk call in this loop - restructure
-	// to a snapshot copy (see tryPlaceholderAllocate) if that is ever needed.
-	for _, request := range sa.sortedRequests {
+	// allocateAsk/deallocateAsk mutate it in place. An index based loop is used deliberately: it
+	// re-reads len() and re-indexes the current slice on every iteration, so a mid-loop remove can
+	// never make it read the nil'd tail slot, and it stays correct if an insert reallocates the
+	// backing array. A "range" loop captures the slice header once and would panic in that case.
+	// On top of that the length is asserted below: every successful-allocation path returns
+	// immediately today, so a length change mid-loop means a future edit mutated and continued.
+	// Worst case without the assert is skipping a single ask for this cycle (self-correcting on the
+	// next cycle) rather than a crash. If a mutate-then-continue is ever really needed, restructure
+	// to a snapshot copy (see tryPlaceholderAllocate).
+	startLen := len(sa.sortedRequests)
+	for i := 0; i < len(sa.sortedRequests); i++ {
+		if len(sa.sortedRequests) != startLen {
+			log.Log(log.SchedApplication).DPanic("sortedRequests mutated during tryAllocate iteration",
+				zap.String("application ID", sa.ApplicationID),
+				zap.Int("length at loop start", startLen),
+				zap.Int("current length", len(sa.sortedRequests)))
+			return nil
+		}
+		request := sa.sortedRequests[i]
 		if backoffThreshold > 0 && unschedulable >= backoffThreshold {
 			log.Log(log.SchedApplication).Info("too many unschedulable asks in the application, waiting",
 				zap.String("application ID", sa.ApplicationID),
