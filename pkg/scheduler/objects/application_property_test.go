@@ -38,8 +38,8 @@ import (
 // of the real ask-management entry points (AddAllocationAsk, AllocateAsk, DeallocateAsk,
 // RemoveAllocationAsk, RecoverAllocationAsk, AddAllocation, RollbackAllocation and FSM-to-Failed
 // cleanup) and after every single step verifies that the incrementally maintained
-// askMaxPriority/pendingPriorities bookkeeping matches a reference model rebuilt from a simple set
-// of maps tracked alongside the application.
+// askMaxPriority/pendingPriorities/sortedRequests bookkeeping matches a reference model rebuilt
+// from a simple set of maps tracked alongside the application.
 //
 // The point is coverage of state combinations rather than of entry points: TestMaxAskPriority pins
 // the handful of transitions that are easy to reason about by hand, while this test reaches the
@@ -110,9 +110,9 @@ func runPropertyFuzz(t *testing.T, seed int64) int { //nolint:funlen
 	// or RecoverAllocationAsk); priority is immutable per ask for the lifetime of the key so this
 	// map is only ever added to (or wiped wholesale on clear-all/cleanup), never mutated in place.
 	keyPriority := make(map[string]int32)
-	// pendingKeys is the reference model of what the pending histogram should contain: keys that are
-	// currently pending (added or deallocated back to pending, and NOT yet allocated, removed, or
-	// recovered-as-allocated).
+	// pendingKeys is the reference model of what sa.sortedRequests / the pending histogram should
+	// contain: keys that are currently pending (added or deallocated back to pending, and NOT yet
+	// allocated, removed, or recovered-as-allocated).
 	pendingKeys := make(map[string]bool)
 	// allocatedKeys is the reference model of keys that are currently allocated (via AllocateAsk or
 	// RecoverAllocationAsk) and not yet deallocated or removed.
@@ -208,8 +208,8 @@ func runPropertyFuzz(t *testing.T, seed int64) int { //nolint:funlen
 			app.RecoverAllocationAsk(alloc)
 			// a recovered ask is already allocated (NodeID set => allocated=true in
 			// NewAllocationFromSI) so addAllocationAskInternal must NOT add it to the pending
-			// histogram: record it only as allocated, never as pending. This is the exact invariant
-			// this fuzz operation is probing.
+			// histogram/sortedRequests: record it only as allocated, never as pending. This is the
+			// exact invariant this fuzz operation is probing.
 			keyPriority[key] = priority
 			allocatedKeys[key] = true
 
@@ -270,10 +270,10 @@ func runPropertyFuzz(t *testing.T, seed int64) int { //nolint:funlen
 			// one RecoverAllocationAsk just added (~line 1263-1264) - so the fuzzer does the same and
 			// passes app.GetAllocationAsk(key) rather than building a second Allocation for the same
 			// key. That matters here: RollbackAllocation deallocates the object it found in
-			// sa.allocations, and deallocateAsk only counts an ask as pending again when it still IS
-			// the object sa.requests holds for that key - so a second Allocation built for the same
-			// key would fail that identity check for a reason the product itself cannot produce,
-			// making the assertions test fiction.
+			// sa.allocations, and if that were a different object the resulting
+			// sortedRequests.insert would put an Allocation into sortedRequests that sa.requests
+			// never contained - a state the product itself cannot produce, so asserting on it would
+			// be testing fiction.
 			if key, ok := pickRandomFilteredKey(rng, allocatedKeys, func(k string) bool {
 				if confirmedKeys[k] {
 					// already in sa.allocations: confirming the same key twice would add its
@@ -303,8 +303,9 @@ func runPropertyFuzz(t *testing.T, seed int64) int { //nolint:funlen
 
 		case 7: // RollbackAllocation - revert a confirmed allocation back to a pending ask
 			// This is the new C1 caller under test: RollbackAllocation runs deallocateAsk
-			// (application.go ~line 875), which is the function that does addToPriorities, so a
-			// still-tracked ask has to reappear in the pending histogram at its original priority.
+			// (application.go ~line 875), which is the function that does addToPriorities plus
+			// sortedRequests.insert, so a still-tracked ask has to reappear in the pending histogram
+			// and in sortedRequests at its original priority.
 			// Candidates deliberately also include confirmed keys whose ask is no longer in
 			// sa.requests at all. That "ghost" state IS reachable in production: sa.allocations is
 			// only cleaned up once the shim confirms the release, so every path that drops asks while
@@ -313,10 +314,10 @@ func runPropertyFuzz(t *testing.T, seed int64) int { //nolint:funlen
 			// removeAsksInternal("") from timeoutPlaceholderProcessing case 2, which is reached from
 			// Running for a soft gang whose ResumeApplication transition is rejected (that event is
 			// only valid from New/Accepted, application_state.go ~line 125) so the app stays Running
-			// and remains rollback-eligible. deallocateAsk must not count such an ask as pending
-			// again - nothing tracks it any more, so nothing would ever take it back out of the
-			// histogram - so the reference model below only marks the key pending again when it is
-			// still tracked.
+			// and remains rollback-eligible. deallocateAsk must not resurrect such an ask into
+			// sortedRequests, where tryAllocate would then try to schedule something the application
+			// does not track any more, so the reference model below only marks the key pending again
+			// when it is still tracked.
 			// The only combination excluded is a confirmed key that is still tracked but already
 			// pending (deallocated without being removed): ask.deallocate() rejects that outright, so
 			// picking it would only ever burn a step.
@@ -342,7 +343,7 @@ func runPropertyFuzz(t *testing.T, seed int64) int { //nolint:funlen
 						pendingKeys[key] = true
 					} else {
 						// ghost rollback: the ask is gone from sa.requests, so deallocateAsk must
-						// leave the pending histogram completely untouched.
+						// leave the pending histogram and sortedRequests completely untouched.
 						ghostRollbacks++
 					}
 				}
@@ -351,9 +352,10 @@ func runPropertyFuzz(t *testing.T, seed int64) int { //nolint:funlen
 		case 8: // AddAllocationAsk re-using an existing key - the replace-existing-ask branch
 			// AddAllocationAsk (application.go ~line 668) handles a key that is already in
 			// sa.requests and still pending separately: it has to unwind the old ask from the
-			// pending histogram before addAllocationAskInternal counts the replacement, or the key
-			// is counted twice and its old priority never drops out again. Case 0 only ever mints
-			// fresh keys, so without this operation that branch is never executed here at all.
+			// pending histogram AND from sortedRequests before the unconditional insert at the end
+			// of the function, or a single allocation key ends up with two sortedRequests entries.
+			// Case 0 only ever mints fresh keys, so without this operation that branch is never
+			// executed here at all.
 			if len(pendingKeys) > 0 {
 				key := pickRandomKey(rng, pendingKeys)
 				existing := app.GetAllocationAsk(key)
@@ -398,7 +400,7 @@ func runPropertyFuzz(t *testing.T, seed int64) int { //nolint:funlen
 	// allocations) would silently turn case 7 into a no-op and stop covering deallocateAsk's new
 	// caller entirely, while every assertion above kept passing.
 	assert.Assert(t, successfulRollbacks > 0, "seed=%d: fuzz run never completed a RollbackAllocation", seed)
-	// The replace-existing-ask branch (case 8) must not double count the key in the histogram. It is
+	// The replace-existing-ask branch (case 8) must not leave a duplicate in sortedRequests. It is
 	// only reached while pendingKeys is non-empty, so assert it really happened rather than trusting
 	// that condition to keep holding. The ghost-rollback count is returned instead of asserted here:
 	// it is too rare to demand per seed, see TestApplicationPropertyFuzzHistogram.
@@ -480,10 +482,10 @@ func pickRandomExistingKey(rng *rand.Rand, keyPriority map[string]int32) (string
 	return list[rng.Intn(len(list))], true
 }
 
-// assertFuzzInvariants rebuilds the expected pending-ask histogram and max from the reference model
-// (keyPriority + pendingKeys) and compares it against the application's incrementally maintained
-// state. On any mismatch it fails with the seed and step number embedded in the message so the
-// failure is reproducible via `go test -run .../seed-<seed>`.
+// assertFuzzInvariants rebuilds the expected pending-ask histogram/max/sortedRequests membership
+// from the reference model (keyPriority + pendingKeys) and compares it against the application's
+// incrementally maintained state. On any mismatch it fails with the seed and step number embedded
+// in the message so the failure is reproducible via `go test -run .../seed-<seed>`.
 // It returns the number of distinct pending priorities observed this step, so the caller can track
 // coverage high-water marks without a second pass over pendingKeys.
 func assertFuzzInvariants(t *testing.T, app *Application, keyPriority map[string]int32, pendingKeys map[string]bool, seed int64, step int) (distinctPendingPriorities int) {
@@ -505,12 +507,29 @@ func assertFuzzInvariants(t *testing.T, app *Application, keyPriority map[string
 	for p, c := range app.pendingPriorities {
 		gotHistogram[p] = c
 	}
+	gotSorted := make([]*Allocation, len(app.sortedRequests))
+	copy(gotSorted, app.sortedRequests)
 	app.RUnlock()
 
 	assert.Equal(t, gotMax, wantMax, "seed=%d step=%d: askMaxPriority mismatch", seed, step)
 	assert.Equal(t, len(gotHistogram), len(wantHistogram), "seed=%d step=%d: pendingPriorities histogram size mismatch, got=%v want=%v", seed, step, gotHistogram, wantHistogram)
 	for p, wantCount := range wantHistogram {
 		assert.Equal(t, gotHistogram[p], wantCount, "seed=%d step=%d: pendingPriorities[%d] mismatch, got histogram=%v want histogram=%v", seed, step, p, gotHistogram, wantHistogram)
+	}
+
+	assert.Equal(t, len(gotSorted), len(pendingKeys), "seed=%d step=%d: len(sortedRequests) mismatch with pending key set", seed, step)
+	gotKeys := make(map[string]bool, len(gotSorted))
+	for i, entry := range gotSorted {
+		assert.Assert(t, !entry.IsAllocated(), "seed=%d step=%d: sortedRequests[%d] (key=%s) is allocated", seed, step, i, entry.GetAllocationKey())
+		gotKeys[entry.GetAllocationKey()] = true
+		if i > 0 {
+			// comparator-validity only (order-independent bonus check); no assertion is made about
+			// tie-break order among equal-priority/equal-createTime asks.
+			assert.Assert(t, gotSorted[i].LessThan(gotSorted[i-1]), "seed=%d step=%d: sortedRequests not descending at index %d", seed, step, i)
+		}
+	}
+	for k := range pendingKeys {
+		assert.Assert(t, gotKeys[k], "seed=%d step=%d: expected pending key %s missing from sortedRequests", seed, step, k)
 	}
 
 	return len(wantHistogram)
