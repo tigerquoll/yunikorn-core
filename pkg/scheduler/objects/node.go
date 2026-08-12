@@ -93,12 +93,20 @@ func NewNode(proto *si.NodeInfo) *Node {
 	return sn
 }
 
+// String describes the node. It only prints the fields that are set when the node is created and
+// never change afterwards.
+//
+// It cannot print the schedulable flag, the resources or the allocation count, which all need the
+// lock: this is called as a zap.Stringer or through a format verb, so it runs wherever the log
+// entry is encoded and under whatever locking the caller happens to have. Reading those fields
+// without the lock races with every mutator, and taking the lock here deadlocks the callers that
+// already hold it, Node.Reserve being one of them. Log those values as separate fields from a
+// place that holds the lock instead, the way updateAvailableResource does.
 func (sn *Node) String() string {
 	if sn == nil {
 		return "node is nil"
 	}
-	return fmt.Sprintf("NodeID %s, Partition %s, Schedulable %t, Total %s, Allocated %s, #allocations %d",
-		sn.NodeID, sn.Partition, sn.schedulable, sn.totalResource, sn.allocatedResource, len(sn.allocations))
+	return fmt.Sprintf("NodeID %s, Partition %s", sn.NodeID, sn.Partition)
 }
 
 // Set the attributes and fast access fields.
