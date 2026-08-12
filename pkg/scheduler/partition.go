@@ -45,6 +45,7 @@ import (
 	"github.com/apache/yunikorn-scheduler-interface/lib/go/si"
 )
 
+// +lockclass:PartitionContext
 type PartitionContext struct {
 	RmID string // the RM the partition belongs to
 	Name string // name of the partition
@@ -1436,7 +1437,15 @@ func (pc *PartitionContext) handleForeignAllocation(allocationKey, applicationID
 func (pc *PartitionContext) convertUGI(ugi *si.UserGroupInformation, forced bool) (security.UserGroup, error) {
 	pc.RLock()
 	defer pc.RUnlock()
-	return pc.userGroupCache.ConvertUGI(ugi, forced)
+	// YUNIKORN-XXXX: resolving a user that is not cached ends in the name service switch and from
+	// there in whatever directory it is configured against, with the partition read lock held. A
+	// slow or unreachable directory blocks every writer of the partition for as long as it takes.
+	// The fix is to resolve outside the lock. The declaration that makes this visible is the
+	// "+blocking" on security.GetUserGroup: the resolver is a function valued field, so nothing
+	// else can see where the call ends up. The make target does not report it, it hands the
+	// analyser a file list rather than a package and the declaration does not cross that
+	// boundary, see the note in the Makefile; running the analysis over the packages does.
+	return pc.userGroupCache.ConvertUGI(ugi, forced) // +lockblockingignore
 }
 
 // getOrStoreForeignAlloc returns whether the allocation already exists or stores it if it's new

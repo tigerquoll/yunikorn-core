@@ -93,7 +93,8 @@ func (p *PreemptionContext) tryPreemption() {
 			victim.SendPreemptedBySchedulerEvent(p.requiredAsk.GetAllocationKey(), p.requiredAsk.GetApplicationID(), p.application.queuePath)
 		}
 		p.requiredAsk.MarkTriggeredPreemption()
-		p.application.notifyRMAllocationReleased(victims, si.TerminationType_PREEMPTED_BY_SCHEDULER,
+		// the wait itself: the application write lock is held all the way from tryReservedAllocate
+		p.application.notifyRMAllocationReleased(victims, si.TerminationType_PREEMPTED_BY_SCHEDULER, // +lockblockingignore
 			"preempting allocations to free up resources to run daemon set ask: "+p.requiredAsk.GetAllocationKey())
 	} else {
 		p.requiredAsk.LogAllocationFailure(common.NoVictimForRequiredNode, true)

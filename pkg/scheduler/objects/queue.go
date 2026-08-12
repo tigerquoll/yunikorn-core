@@ -49,6 +49,7 @@ var (
 )
 
 // Queue structure inside Scheduler
+// +lockclass:Queue
 type Queue struct {
 	QueuePath string // Fully qualified path for the queue
 	Name      string // Queue name as in the config etc.
@@ -2133,6 +2134,10 @@ func (sq *Queue) removeMetrics() {
 	metrics.RemoveQueueMetrics(sq.QueuePath)
 }
 
+// YUNIKORN-XXXX: String takes the queue read lock, and the excludewrite annotation below cannot
+// cover the fmt and zap call sites, which are not calls this analysis can see, see
+// TrackedResource.String. The fix is the same.
+// +lockstringerignore
 // +checklocksexcludewrite:sq.RWMutex
 func (sq *Queue) String() string {
 	sq.RLock()

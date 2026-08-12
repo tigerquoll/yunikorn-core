@@ -40,6 +40,7 @@ var m *Manager
 
 // Manager implements tracker. A User Group Manager to track the usage for both user and groups.
 // Holds object of both user and group trackers
+// +lockclass:UGMManager
 type Manager struct {
 	// +checklocks:RWMutex
 	userTrackers map[string]*UserTracker

@@ -42,6 +42,7 @@ import (
 
 const disableReservation = "DISABLE_RESERVATION"
 
+// +lockclass:ClusterContext
 type ClusterContext struct {
 	// +checklocks:RWMutex
 	partitions map[string]*PartitionContext
@@ -168,9 +169,15 @@ func (cc *ClusterContext) processRMRegistrationEvent(event *rmevent.RMRegistrati
 	defer cc.Unlock()
 	rmID := event.Registration.RmID
 
+	// YUNIKORN-XXXX: every reply this function and its two siblings below send is an unbuffered
+	// send made while the cluster context write lock is held. Nothing guarantees the reply is
+	// collected: a receiver that has gone away leaves the send waiting for ever, and with it the
+	// write lock, which stalls scheduling, the REST endpoints and the health check alike. No test
+	// exercises a dropped reply. This is the known RM event plumbing hazard seen from the lock
+	// side, not a new one; the fix is to reply after unlocking or to buffer the reply channel.
 	// we should not have any partitions set at this point
 	if len(cc.partitions) > 0 {
-		event.Channel <- &rmevent.Result{
+		event.Channel <- &rmevent.Result{ // +lockblockingignore
 			Reason:    fmt.Sprintf("RM %s has been registered before, active partitions %d", rmID, len(cc.partitions)),
 			Succeeded: false,
 		}
@@ -187,12 +194,18 @@ func (cc *ClusterContext) processRMRegistrationEvent(event *rmevent.RMRegistrati
 	}
 	conf, err := configs.LoadSchedulerConfigFromByteArray([]byte(config))
 	if err != nil {
-		event.Channel <- &rmevent.Result{Succeeded: false, Reason: err.Error()}
+		event.Channel <- &rmevent.Result{Succeeded: false, Reason: err.Error()} // +lockblockingignore
 		return
 	}
-	err = cc.updateSchedulerConfig(conf, rmID)
+	// YUNIKORN-XXXX: the config update reaches partitionManager.Stop, and stopping a partition
+	// manager runs partitionManager.remove, which calls ClusterContext.removePartition and takes
+	// this lock a second time: the partition removal self deadlock of YUNIKORN-2233. The tests
+	// stop the manager without the lock held, which is why the path is never taken there. The fix
+	// on that JIRA is to drop the removePartition call from remove, not to run remove in its own
+	// goroutine, which is what reopened it the first time.
+	err = cc.updateSchedulerConfig(conf, rmID) // +lockorderignore
 	if err != nil {
-		event.Channel <- &rmevent.Result{Succeeded: false, Reason: err.Error()}
+		event.Channel <- &rmevent.Result{Succeeded: false, Reason: err.Error()} // +lockblockingignore
 		return
 	}
 
@@ -204,7 +217,7 @@ func (cc *ClusterContext) processRMRegistrationEvent(event *rmevent.RMRegistrati
 	cc.SetRMInfo(rmID, event.Registration.BuildInfo)
 
 	// Done, notify channel
-	event.Channel <- &rmevent.Result{
+	event.Channel <- &rmevent.Result{ // +lockblockingignore
 		Succeeded: true,
 	}
 }
@@ -215,7 +228,8 @@ func (cc *ClusterContext) processRMConfigUpdateEvent(event *rmevent.RMConfigUpda
 	rmID := event.RmID
 	// need to enhance the check to support multiple RMs
 	if len(cc.partitions) == 0 {
-		event.Channel <- &rmevent.Result{
+		// the reply under the lock, see processRMRegistrationEvent above
+		event.Channel <- &rmevent.Result{ // +lockblockingignore
 			Reason:    fmt.Sprintf("RM %s has no active partitions, make sure it is registered", rmID),
 			Succeeded: false,
 		}
@@ -233,25 +247,26 @@ func (cc *ClusterContext) processRMConfigUpdateEvent(event *rmevent.RMConfigUpda
 	}
 	conf, err := configs.LoadSchedulerConfigFromByteArray([]byte(config))
 	if err != nil {
-		event.Channel <- &rmevent.Result{Succeeded: false, Reason: err.Error()}
+		event.Channel <- &rmevent.Result{Succeeded: false, Reason: err.Error()} // +lockblockingignore
 		return
 	}
 	// skip update if config has not changed
 	oldConf := configs.ConfigContext.Get(cc.policyGroup)
 	if conf.Checksum == oldConf.Checksum {
-		event.Channel <- &rmevent.Result{
+		event.Channel <- &rmevent.Result{ // +lockblockingignore
 			Succeeded: true,
 		}
 		return
 	}
 	// update scheduler configuration
-	err = cc.updateSchedulerConfig(conf, rmID)
+	// the partition removal self deadlock, see processRMRegistrationEvent above
+	err = cc.updateSchedulerConfig(conf, rmID) // +lockorderignore
 	if err != nil {
-		event.Channel <- &rmevent.Result{Succeeded: false, Reason: err.Error()}
+		event.Channel <- &rmevent.Result{Succeeded: false, Reason: err.Error()} // +lockblockingignore
 		return
 	}
 	// Done, notify channel
-	event.Channel <- &rmevent.Result{
+	event.Channel <- &rmevent.Result{ // +lockblockingignore
 		Succeeded: true,
 	}
 	// update global scheduler configs
@@ -322,7 +337,8 @@ func (cc *ClusterContext) removePartitionsByRMID(event *rmevent.RMPartitionsRemo
 	// Just remove corresponding partitions
 	for k, partition := range cc.partitions {
 		if partition.RmID == event.RmID {
-			partition.partitionManager.Stop()
+			// the partition removal self deadlock, see processRMRegistrationEvent above
+			partition.partitionManager.Stop() // +lockorderignore
 			partitionToRemove[k] = true
 		}
 	}
@@ -331,7 +347,7 @@ func (cc *ClusterContext) removePartitionsByRMID(event *rmevent.RMPartitionsRemo
 		delete(cc.partitions, partitionName)
 	}
 	// Done, notify channel
-	event.Channel <- &rmevent.Result{
+	event.Channel <- &rmevent.Result{ // +lockblockingignore
 		Succeeded: true,
 	}
 }
@@ -351,7 +367,8 @@ func (cc *ClusterContext) UpdateRMSchedulerConfig(rmID string, config []byte) er
 	if err != nil {
 		return err
 	}
-	err = cc.updateSchedulerConfig(conf, rmID)
+	// the partition removal self deadlock, see processRMRegistrationEvent above
+	err = cc.updateSchedulerConfig(conf, rmID) // +lockorderignore
 	if err != nil {
 		return err
 	}
@@ -404,7 +421,8 @@ func (cc *ClusterContext) updateSchedulerConfig(conf *configs.SchedulerConfig, r
 	// get the removed partitions, mark them as deleted
 	for _, part := range cc.partitions {
 		if !visited[part.Name] {
-			part.partitionManager.Stop()
+			// the partition removal self deadlock, see processRMRegistrationEvent above
+			part.partitionManager.Stop() // +lockorderignore
 			log.Log(log.SchedContext).Info("marked partition for removal",
 				zap.String("partitionName", part.Name))
 		}

@@ -81,6 +81,7 @@ type StateLogEntry struct {
 	ApplicationState string
 }
 
+// +lockclass:Application
 type Application struct {
 	ApplicationID string            // application ID
 	Partition     string            // partition Name
@@ -206,6 +207,10 @@ func NewApplication(siApp *si.AddApplicationRequest, ugi security.UserGroup, eve
 	return app
 }
 
+// YUNIKORN-XXXX: GetSubmissionTime takes the application read lock, so formatting an application
+// from code that holds the write lock deadlocks on it, see TrackedResource.String. The submission
+// time is set at construction and could be read directly, which is the fix.
+// +lockstringerignore
 func (sa *Application) String() string {
 	if sa == nil {
 		return "application is nil"
@@ -389,7 +394,12 @@ func (sa *Application) timeoutStateTimer(expectedState string, event application
 					zap.Int("replaced", replacing),
 					zap.Int("preempted", preempted),
 					zap.Int("releasing", len(toRelease)))
-				sa.notifyRMAllocationReleased(toRelease, si.TerminationType_TIMEOUT, "releasing placeholders on app complete")
+				// YUNIKORN-XXXX: notifyRMAllocationReleased hands the release to the RM and then
+				// waits on an unbuffered channel for the answer, and the application write lock is
+				// held across that round trip here and at the four sites below. An RM that never
+				// answers holds the application for ever: nothing can schedule, complete or query
+				// it. The fix is to notify after unlocking.
+				sa.notifyRMAllocationReleased(toRelease, si.TerminationType_TIMEOUT, "releasing placeholders on app complete") // +lockblockingignore
 				sa.clearStateTimer()
 			} else {
 				// nolint: errcheck
@@ -471,7 +481,8 @@ func (sa *Application) timeoutPlaceholderProcessing() {
 			zap.Int("preempted", preempted),
 			zap.Int("releasing", len(toRelease)))
 		// trigger the release of the placeholders: accounting updates when the release is done
-		sa.notifyRMAllocationReleased(toRelease, si.TerminationType_TIMEOUT, "releasing allocated placeholders on placeholder timeout")
+		// the RM round trip under the write lock, see timeoutStateTimer above
+		sa.notifyRMAllocationReleased(toRelease, si.TerminationType_TIMEOUT, "releasing allocated placeholders on placeholder timeout") // +lockblockingignore
 	} else {
 		// Case 2: in every other case progress the application, and notify the context about the expired placeholders
 		// change the status of the app based on gang style: soft resume normal allocations, hard fail the app
@@ -523,9 +534,10 @@ func (sa *Application) timeoutPlaceholderProcessing() {
 		released := sa.removeAsksInternal("", si.EventRecord_REQUEST_TIMEOUT)
 		sa.executeReservationReleasedCallback(released)
 		// trigger the release of the allocated placeholders: accounting updates when the release is done
-		sa.notifyRMAllocationReleased(toRelease, si.TerminationType_TIMEOUT, "releasing allocated placeholders on placeholder timeout")
+		// the RM round trip under the write lock, see timeoutStateTimer above
+		sa.notifyRMAllocationReleased(toRelease, si.TerminationType_TIMEOUT, "releasing allocated placeholders on placeholder timeout") // +lockblockingignore
 		// trigger the release of the pending placeholders: accounting has been done
-		sa.notifyRMAllocationReleased(pendingRelease, si.TerminationType_TIMEOUT, "releasing pending placeholders on placeholder timeout")
+		sa.notifyRMAllocationReleased(pendingRelease, si.TerminationType_TIMEOUT, "releasing pending placeholders on placeholder timeout") // +lockblockingignore
 	}
 	sa.clearPlaceholderTimer()
 }
@@ -1190,6 +1202,8 @@ func (sa *Application) tryAllocate(headRoom *resources.Resource, allowPreemption
 			if allowPreemption {
 				fullIterator := fullNodeIterator()
 				if fullIterator != nil {
+					// YUNIKORN-XXXX: tryPreemption reaches the RM round trip of timeoutStateTimer
+					// above with the write lock held, see the note on that function.
 					if result, ok := sa.tryPreemption(headRoom, preemptionDelay, preemptAttemptsRemaining, request, fullIterator, false); ok {
 						// preemption occurred, and possibly reservation
 						return result
@@ -1388,7 +1402,8 @@ func (sa *Application) tryPlaceholderAllocate(nodeIterator func() NodeIterator, 
 						zap.String("applicationID", sa.ApplicationID),
 						zap.String("allocationKey", ph.GetAllocationKey()))
 				} else {
-					sa.notifyRMAllocationReleased([]*Allocation{ph}, si.TerminationType_TIMEOUT, "cancel placeholder: resource incompatible")
+					// the RM round trip under the write lock, see timeoutStateTimer above
+					sa.notifyRMAllocationReleased([]*Allocation{ph}, si.TerminationType_TIMEOUT, "cancel placeholder: resource incompatible") // +lockblockingignore
 					sa.appEvents.SendPlaceholderLargerEvent(ph.taskGroupName, sa.ApplicationID, ph.allocationKey, request.GetAllocatedResource(), ph.GetAllocatedResource())
 				}
 				continue
@@ -1541,6 +1556,11 @@ func (sa *Application) checkHeadRooms(ask *Allocation, userHeadroom *resources.R
 }
 
 // tryReservedAllocate tries allocating an outstanding reservation
+// The preemption call below reaches the RM round trip of timeoutStateTimer with the write lock
+// held, see tryAllocate. The suppression is on the function because that line already carries a
+// checklocks ignore and the annotations are matched on the start of the comment, so a second one
+// on the same line would never be read.
+// +lockblockingignore
 func (sa *Application) tryReservedAllocate(headRoom *resources.Resource, nodeIterator func() NodeIterator) *AllocationResult {
 	sa.Lock()
 	defer sa.Unlock()
@@ -1624,6 +1644,13 @@ func (sa *Application) tryReservedAllocate(headRoom *resources.Resource, nodeIte
 	return nil
 }
 
+// The preemption chain below ends in notifyRMAllocationReleased, so the RM round trip of
+// timeoutStateTimer is taken with the application write lock held here and at the two callers of
+// this function: a sixth site of that finding, which is recorded as having five, because the wait
+// is not in TryPreemption's own body but one call further down. The suppression is on the function
+// rather than on the call because that line already carries a checklocks ignore and the
+// annotations are matched on the start of the comment.
+// +lockblockingignore
 // +checklocks:sa.RWMutex
 func (sa *Application) tryPreemption(headRoom *resources.Resource, preemptionDelay time.Duration, preemptionAttemptsRemaining *int, ask *Allocation, iterator NodeIterator, nodesTried bool) (*AllocationResult, bool) {
 	if *preemptionAttemptsRemaining == 0 {

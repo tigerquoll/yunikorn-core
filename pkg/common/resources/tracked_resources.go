@@ -54,6 +54,11 @@ func NewTrackedResourceFromMap(m map[string]map[string]Quantity) *TrackedResourc
 	return &TrackedResource{TrackedResourceMap: trackedMap}
 }
 
+// YUNIKORN-XXXX: String takes the read lock of the object it prints, and fmt and zap call it at a
+// point this type does not choose: formatting a tracked resource from code that already holds the
+// write lock deadlocks on it. The fix is to print only fields fixed at construction, or to have
+// the caller take a snapshot under the lock and print that.
+// +lockstringerignore
 // +checklocksexcludewrite:tr.RWMutex
 func (tr *TrackedResource) String() string {
 	if tr == nil {

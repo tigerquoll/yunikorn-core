@@ -38,6 +38,7 @@ const (
 	UnknownInstanceType = "UNKNOWN"
 )
 
+// +lockclass:Node
 type Node struct {
 	// Fields for fast access These fields are considered read only.
 	// Values should only be set when creating a new node and never changed.
@@ -102,6 +103,7 @@ func NewNode(proto *si.NodeInfo) *Node {
 	return sn
 }
 
+// +lockstringerignore
 func (sn *Node) String() string {
 	if sn == nil {
 		return "node is nil"

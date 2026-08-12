@@ -28,6 +28,7 @@ import (
 	"github.com/apache/yunikorn-core/pkg/webservice/dao"
 )
 
+// +lockclass:UserTracker
 type UserTracker struct {
 	userName string // Name of the user for which usage is being tracked upon
 

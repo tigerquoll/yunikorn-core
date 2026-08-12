@@ -27,6 +27,7 @@ import (
 	"github.com/apache/yunikorn-core/pkg/webservice/dao"
 )
 
+// +lockclass:GroupTracker
 type GroupTracker struct {
 	groupName string // Name of the group for which usage is being tracked upon
 	// +checklocks:RWMutex

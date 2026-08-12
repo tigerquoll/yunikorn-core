@@ -192,6 +192,10 @@ func (a *Allocation) NewSIFromAllocation() *si.Allocation {
 	}
 }
 
+// YUNIKORN-XXXX: GetAllocatedResource takes the allocation read lock, so formatting an allocation
+// from code that holds the write lock deadlocks on it, see TrackedResource.String. The fix is the
+// same: print fields fixed at construction, or a snapshot the caller took under the lock.
+// +lockstringerignore
 func (a *Allocation) String() string {
 	if a == nil {
 		return "nil allocation"

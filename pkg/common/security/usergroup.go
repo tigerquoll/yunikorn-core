@@ -207,6 +207,11 @@ func (c *UserGroupCache) ConvertUGI(ugi *si.UserGroupInformation, force bool) (U
 // GetUserGroup get the user group information for a singe user. An error will still return a UserGroup.
 // The Failed flag in the object will be set to true for any failures.
 // The information is cached, negatively and positively.
+// The resolver is reached through a function valued field, so no analysis can see that this
+// call ends in os/user, and from there in the name service switch and whatever directory it
+// is configured against. The declaration is what says so.
+//
+// +blocking
 // +checklocksexclude:c.lock
 func (c *UserGroupCache) GetUserGroup(userName string) (UserGroup, error) {
 	// check if we have a user to resolve

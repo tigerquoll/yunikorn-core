@@ -18,7 +18,14 @@
  limitations under the License.
 */
 
+// The edge below, and the two classes it relates, belong to this file alone. They are read
+// only when the analyzer is handed this file, which no build ever is, so the taxonomy of the
+// package is not affected by them.
+//
+// +lockorder:CanaryOuter < CanaryInner
 package locking
+
+import "strconv"
 
 // This file is the canary for the checklocks analysis, it is not part of any build. The
 // "checklocks" make target passes it to the analyzer explicitly, which ignores the build
@@ -32,10 +39,19 @@ package locking
 // lock from this package, held in a named field, with a field guarded by a "+checklocks:"
 // annotation.
 //
-// Two classes of violation are covered, the make target checks for both messages: a guarded
-// field accessed without the lock and a call to a method that must not be called with the
-// lock held. Losing either one is a real loss of coverage, the second class is the only
-// machine check we have on the self deadlock rules.
+// One class of violation is covered per analyzer of the vet tool, and the make target checks
+// for every message separately. The analyzers are independent of each other: an analyzer that
+// stops reporting, or that is dropped from the command line, takes its own coverage with it
+// and leaves the others green, which is exactly what this file exists to catch.
+//
+//	checklocks    a guarded field accessed without the lock, and a call to a method that
+//	              must not be called with the lock held: the second is the only machine
+//	              check we have on the self deadlock rules
+//	lockstringer  a String method reading a guarded field, which races whatever fmt or zap
+//	              was formatting it under
+//	lockorder     an acquisition that takes the classes in the order the declaration
+//	              forbids
+//	lockblocking  a wait for something outside this process while a classed lock is held
 
 type canary struct {
 	// +checklocks:mu
@@ -71,4 +87,60 @@ func (c *canary) reentrantCall(value int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.selfLocking(value)
+}
+
+// String is the lockstringer violation: fmt and zap call it at a point the type does not
+// choose, so the guarded read below races any writer. The analysis must report a guarded read.
+func (c *canary) String() string {
+	return strconv.Itoa(c.value)
+}
+
+// canaryOuter and canaryInner carry the two classes of the edge declared at the top of this
+// file, in the two shapes the code base uses: a named lock field and an embedded lock.
+//
+// +lockclass:CanaryOuter
+type canaryOuter struct {
+	mu RWMutex
+}
+
+// +lockclass:CanaryInner
+type canaryInner struct {
+	RWMutex
+}
+
+// downwardAcquire takes the two classes in the declared order. It must not be reported.
+func downwardAcquire(o *canaryOuter, i *canaryInner) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	i.Lock()
+	defer i.Unlock()
+}
+
+// upwardAcquire is the lockorder violation: the outer class is declared before the inner one,
+// so taking it while the inner one is held is the inversion. The analysis must report the
+// declared order here.
+func upwardAcquire(o *canaryOuter, i *canaryInner) {
+	i.Lock()
+	defer i.Unlock()
+	o.mu.Lock()
+	defer o.mu.Unlock()
+}
+
+// nonBlockingSend hands the value over without waiting, the dispatch idiom. It must not be
+// reported: a select with a default never waits.
+func (o *canaryOuter) nonBlockingSend(reply chan int, value int) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	select {
+	case reply <- value:
+	default:
+	}
+}
+
+// blockingReceive is the lockblocking violation: the lock is held while waiting for an answer
+// that may never come. The analysis must report a wait under a lock.
+func (o *canaryOuter) blockingReceive(reply chan int) int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return <-reply
 }

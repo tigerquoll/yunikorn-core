@@ -601,7 +601,8 @@ func (p *Preemptor) TryPreemption() (*AllocationResult, bool) {
 	p.application.executeReservationReleasedCallback(released)
 
 	// try to find a node to schedule on and victims to preempt
-	nodeID, victims, ok := p.tryNodes()
+	// the RM round trip under the application write lock, see Application.tryPreemption
+	nodeID, victims, ok := p.tryNodes() // +lockblockingignore
 	if !ok {
 		// no preemption possible
 		return nil, false
@@ -706,7 +707,9 @@ func (p *Preemptor) TryPreemption() (*AllocationResult, bool) {
 	p.ask.MarkTriggeredPreemption()
 
 	// notify RM that victims should be released
-	p.application.notifyRMAllocationReleased(finalVictims, si.TerminationType_PREEMPTED_BY_SCHEDULER,
+	// the wait itself: the application write lock is held all the way from tryAllocate, see
+	// Application.tryPreemption
+	p.application.notifyRMAllocationReleased(finalVictims, si.TerminationType_PREEMPTED_BY_SCHEDULER, // +lockblockingignore
 		"preempting allocations to free up resources to run ask: "+p.ask.GetAllocationKey())
 
 	// reserve the selected node for the new allocation if it will fit

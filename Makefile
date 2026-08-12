@@ -123,6 +123,8 @@ CHECKLOCKS_GO_REQUIRED=$(shell "$(GO)" list -C "$(CHECKLOCKS_MOD_DIR)" -m -f '{{
 CHECKLOCKS_GO_CURRENT=$(patsubst go%,%,$(shell "$(GO)" env GOVERSION))
 # Fixture holding a known lock violation, see the checklocks target.
 CHECKLOCKS_CANARY=pkg/locking/checklocks_canary.go
+# The messages the canary must produce, one per class of violation it holds.
+CHECKLOCKS_CANARY_MESSAGES := "invalid field access" "must not hold" "guarded read races" "the declared order has" "a wait under a lock"
 
 all:
 	$(MAKE) -C $(dir $(BASE_DIR)) build
@@ -185,27 +187,43 @@ CHECKLOCKS_PACKAGES := $(REPO)/...
 # variant of a package so the file list of each package is passed instead. Inferred locks are
 # turned off: those are guesses based on how often a field happens to be used under a lock,
 # they are not the documented intent and they change as unrelated code changes.
+# The file list costs one thing: the analysed package has no module of its own as far as the
+# tool is concerned, so a callee in another package of this repository is not recognised as
+# ours and what it declares about waiting is not carried to the caller. Findings of that shape
+# only show up in a run over the packages, which the annotations state anyway, see convertUGI
+# in pkg/scheduler. Everything else, including all of the ordering checks, is unaffected.
+# The vet tool runs several analyses and every one of them is named on the command line. Naming
+# them is not the same as taking the default: an analysis added by a later version of the tool
+# then has to be adopted deliberately instead of appearing as a wall of findings on an unrelated
+# change. Each analysis has its flags under its own name, "-lockorder.hierarchy" is left at its
+# default of off: it compares instances, which a summary cannot carry, so it is a hand run tool
+# rather than a gate.
+CHECKLOCKS_ANALYZERS := -checklocks -lockstringer -lockorder -lockblocking
+CHECKLOCKS_FLAGS := $(CHECKLOCKS_ANALYZERS) -checklocks.inferred=false
 checklocks: $(CHECKLOCKS_BIN)
 	@echo "running checklocks"
 	@"$(GO)" list -f '{{if .GoFiles}}{{$$dir := .Dir}}{{range .GoFiles}}{{$$dir}}/{{.}} {{end}}{{end}}' $(CHECKLOCKS_PACKAGES) | \
 	while read -r gofiles; do \
 		[ -n "$$gofiles" ] || continue; \
-		"$(GO)" vet "-vettool=$(BASE_DIR)$(CHECKLOCKS_BIN)" -inferred=false $$gofiles || exit 1; \
+		"$(GO)" vet "-vettool=$(BASE_DIR)$(CHECKLOCKS_BIN)" $(CHECKLOCKS_FLAGS) $$gofiles || exit 1; \
 	done
 # Prove that the analysis still detects anything at all. The canary is a file with known
 # violations that no build compiles, it is passed explicitly which makes the analysis ignore
 # its build constraint. It is checked together with the locking package as it uses the locks
 # defined there. Both the exit code and the messages are checked: a canary that fails to build
-# or is not found would otherwise look exactly like a violation that was caught. Both classes
-# of violation are required, a guarded field used without the lock and a call into a method
-# that must not be called with the lock held, as they are detected independently.
+# or is not found would otherwise look exactly like a violation that was caught. Every class of
+# violation is required separately, one per analysis plus the second checklocks one, as they are
+# detected independently: an analysis that stops reporting or that is dropped from the command
+# line above would otherwise leave the canary green on the strength of the other messages.
 	@canary="$$("$(GO)" list -f '{{$$dir := .Dir}}{{range .GoFiles}}{{$$dir}}/{{.}} {{end}}' $(REPO)/locking) $(BASE_DIR)$(CHECKLOCKS_CANARY)"; \
-	report=$$("$(GO)" vet "-vettool=$(BASE_DIR)$(CHECKLOCKS_BIN)" -inferred=false $$canary 2>&1); \
+	report=$$("$(GO)" vet "-vettool=$(BASE_DIR)$(CHECKLOCKS_BIN)" $(CHECKLOCKS_FLAGS) $$canary 2>&1); \
 	found=$$?; \
-	if [ $$found -eq 0 ] || \
-		! printf '%s' "$$report" | grep -q "invalid field access" || \
-		! printf '%s' "$$report" | grep -q "must not hold"; then \
-		echo "checklocks canary failed: analyzer did not detect a known violation"; \
+	missing=""; \
+	for message in $(CHECKLOCKS_CANARY_MESSAGES); do \
+		printf '%s' "$$report" | grep -q "$$message" || missing="$$missing $$message"; \
+	done; \
+	if [ $$found -eq 0 ] || [ -n "$$missing" ]; then \
+		echo "checklocks canary failed: analyzer did not detect a known violation:$$missing"; \
 		printf '%s\n' "$$report"; \
 		exit 1; \
 	fi
