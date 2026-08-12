@@ -33,8 +33,9 @@ const defaultChannelBufSize = 1000
 // EventStreaming implements the event streaming logic.
 // New events are immediately forwarded to all active consumers.
 type EventStreaming struct {
-	buffer       *eventRingBuffer
-	stopCh       chan struct{}
+	buffer *eventRingBuffer // set on creation and never changed, no lock needed
+	stopCh chan struct{}    // set on creation and never changed, no lock needed
+	// +checklocks:RWMutex
 	eventStreams map[*EventStream]eventConsumerDetails
 	locking.RWMutex
 }
@@ -65,6 +66,7 @@ type EventStream struct {
 //
 // If "local" is full, it means that the consumer side has not processed the events at an appropriate pace.
 // Such a consumer is removed and the related channels are closed.
+// +checklocksexclude:e.RWMutex
 func (e *EventStreaming) PublishEvent(event *si.EventRecord) {
 	e.Lock()
 	defer e.Unlock()
@@ -87,6 +89,7 @@ func (e *EventStreaming) PublishEvent(event *si.EventRecord) {
 //
 // Consumers have an arbitrary name for logging purposes. The "count" parameter defines the number
 // of maximum historical events from the ring buffer. "0" is a valid value and means no past events.
+// +checklocksexclude:e.RWMutex
 func (e *EventStreaming) CreateEventStream(name string, count uint64) *EventStream {
 	consumer := make(chan *si.EventRecord, defaultChannelBufSize)
 	stream := &EventStream{
@@ -152,6 +155,7 @@ func (e *EventStreaming) createEventStreamInternal(stream *EventStream,
 }
 
 // RemoveEventStream stops the streaming for a given consumer. Must be called to avoid resource leaks.
+// +checklocksexclude:e.RWMutex
 func (e *EventStreaming) RemoveEventStream(consumer *EventStream) {
 	e.Lock()
 	defer e.Unlock()
@@ -159,6 +163,7 @@ func (e *EventStreaming) RemoveEventStream(consumer *EventStream) {
 	e.removeEventStream(consumer)
 }
 
+// +checklocks:e.RWMutex
 func (e *EventStreaming) removeEventStream(consumer *EventStream) {
 	if details, ok := e.eventStreams[consumer]; ok {
 		log.Log(log.Events).Info("Removing event stream consumer", zap.String("name", details.name),
@@ -175,6 +180,7 @@ func (e *EventStreaming) Close() {
 }
 
 // GetEventStreams returns the current active event streams.
+// +checklocksexcludewrite:e.RWMutex
 func (e *EventStreaming) GetEventStreams() []EventStreamData {
 	e.RLock()
 	defer e.RUnlock()

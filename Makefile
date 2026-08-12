@@ -183,7 +183,7 @@ lint: $(GOLANGCI_LINT_BIN)
 # lock balance errors which would fail the check. Adding a package can also require
 # annotating the callers of its already annotated exported functions in other packages: the
 # lock requirement of a function is only enforced for callers inside the listed packages.
-CHECKLOCKS_PACKAGES := $(REPO)/locking/... $(REPO)/scheduler/ugm/...
+CHECKLOCKS_PACKAGES := $(REPO)/locking/... $(REPO)/common/security/... $(REPO)/events/... $(REPO)/scheduler/ugm/...
 # Only the non test files of a package are analysed. "go vet" has no option to skip the test
 # variant of a package so the file list of each package is passed instead. Inferred locks are
 # turned off: those are guesses based on how often a field happens to be used under a lock,
