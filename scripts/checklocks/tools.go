@@ -24,5 +24,5 @@
 package tools
 
 import (
-	_ "gvisor.dev/gvisor/tools/checklocks/cmd/checklocks"
+	_ "github.com/tigerquoll/checklocks/cmd/checklocks"
 )

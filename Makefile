@@ -109,17 +109,16 @@ GOLANGCI_LINT_ARCHIVEBASE=golangci-lint-$(GOLANGCI_LINT_VERSION)-$(OS)-$(EXEC_AR
 GOLANGCI_LINT_ARCHIVE=$(GOLANGCI_LINT_ARCHIVEBASE).tar.gz
 
 # checklocks
-# The version is pinned in the go.mod of the tools module, gvisor does not publish semantic
-# versions, only date based pseudo versions: update by picking a newer pseudo version from
-# the gvisor master branch and running "go mod tidy" in the tools module.
+# The version is pinned in the go.mod of the tools module: bump it with "go get" in that directory
+# followed by "go mod tidy".
 CHECKLOCKS_MOD_DIR=scripts/checklocks
-CHECKLOCKS_VERSION=$(shell "$(GO)" list -C "$(CHECKLOCKS_MOD_DIR)" -m -f '{{ .Version }}' gvisor.dev/gvisor)
+CHECKLOCKS_VERSION=$(shell "$(GO)" list -C "$(CHECKLOCKS_MOD_DIR)" -m -f '{{ .Version }}' github.com/tigerquoll/checklocks)
 # The path is keyed on the go version as well as the checklocks version: the export data of a
 # vet tool must match the toolchain that runs "go vet", so a go upgrade must rebuild the tool.
 CHECKLOCKS_PATH=${TOOLS_DIR}/checklocks-$(CHECKLOCKS_VERSION)-$(shell "$(GO)" env GOVERSION)
 CHECKLOCKS_BIN=$(CHECKLOCKS_PATH)/checklocks
 # The go version the tools module needs against the version that is running, both without the
-# "go" prefix. Read from the go directive so that a gvisor update cannot make these drift.
+# "go" prefix. Read from the go directive so that a tool update cannot make these drift.
 CHECKLOCKS_GO_REQUIRED=$(shell "$(GO)" list -C "$(CHECKLOCKS_MOD_DIR)" -m -f '{{ .GoVersion }}')
 CHECKLOCKS_GO_CURRENT=$(patsubst go%,%,$(shell "$(GO)" env GOVERSION))
 # Fixture holding a known lock violation, see the checklocks target.
@@ -148,15 +147,13 @@ $(GOLANGCI_LINT_BIN):
 		| tar -x -z --strip-components=1 -C "$(GOLANGCI_LINT_PATH)" "$(GOLANGCI_LINT_ARCHIVEBASE)/golangci-lint"
 
 # Install checklocks
-# Built from the tools module in $(CHECKLOCKS_MOD_DIR): gvisor is a tool only dependency and
+# Built from the tools module in $(CHECKLOCKS_MOD_DIR): the analyser is a tool only dependency and
 # must not end up in the go.mod of the scheduler. Building from a module instead of using
-# "go install pkg@version" pins the whole dependency tree via its go.sum. That module needs a
-# newer go than the scheduler does, so the go directive there is higher than the one in the
-# main go.mod on purpose.
+# "go install pkg@version" pins the whole dependency tree via its go.sum.
 $(CHECKLOCKS_BIN): | checklocks-toolchain
 	@echo "installing checklocks $(CHECKLOCKS_VERSION)"
 	@mkdir -p "$(CHECKLOCKS_PATH)"
-	@"$(GO)" build -C "$(CHECKLOCKS_MOD_DIR)" -o "$(BASE_DIR)$(CHECKLOCKS_BIN)" gvisor.dev/gvisor/tools/checklocks/cmd/checklocks
+	@"$(GO)" build -C "$(CHECKLOCKS_MOD_DIR)" -o "$(BASE_DIR)$(CHECKLOCKS_BIN)" github.com/tigerquoll/checklocks/cmd/checklocks
 
 # Refuse to build or run the analyser with a go that is older than the tools module needs.
 # A vet tool must be built with the toolchain that runs "go vet" or the export data does not
