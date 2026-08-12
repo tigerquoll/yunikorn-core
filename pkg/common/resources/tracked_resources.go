@@ -33,6 +33,7 @@ type TrackedResource struct {
 	// TrackedResourceMap is a two-level map for aggregated resource usage.
 	// The top-level key is the instance type, and the value is a map:
 	//   resource type (CPU, memory, etc.) -> aggregated used time (in seconds) of the resource type.
+	// +checklocks:RWMutex
 	TrackedResourceMap map[string]*Resource
 
 	locking.RWMutex
@@ -53,6 +54,7 @@ func NewTrackedResourceFromMap(m map[string]map[string]Quantity) *TrackedResourc
 	return &TrackedResource{TrackedResourceMap: trackedMap}
 }
 
+// +checklocksexcludewrite:tr.RWMutex
 func (tr *TrackedResource) String() string {
 	if tr == nil {
 		return "TrackedResource{}"
@@ -71,6 +73,7 @@ func (tr *TrackedResource) String() string {
 }
 
 // Clone creates a deep copy of TrackedResource.
+// +checklocksexcludewrite:tr.RWMutex
 func (tr *TrackedResource) Clone() *TrackedResource {
 	if tr == nil {
 		return nil
@@ -79,13 +82,15 @@ func (tr *TrackedResource) Clone() *TrackedResource {
 	tr.RLock()
 	defer tr.RUnlock()
 	for k, v := range tr.TrackedResourceMap {
-		ret.TrackedResourceMap[k] = v.Clone()
+		// the copy is local and cannot be reached by anything else yet, so no lock is taken on it
+		ret.TrackedResourceMap[k] = v.Clone() // +checklocksignore
 	}
 	return ret
 }
 
 // AggregateTrackedResource aggregates resource usage to TrackedResourceMap[instType].
 // The time the given resource used is the delta between the resource createTime and currentTime.
+// +checklocksexclude:tr.RWMutex
 func (tr *TrackedResource) AggregateTrackedResource(instType string, resource *Resource, bindTime time.Time) {
 	if resource == nil {
 		return
@@ -107,6 +112,7 @@ func (tr *TrackedResource) AggregateTrackedResource(instType string, resource *R
 
 // EqualsDAO compares the TrackedResource against the DAO map that was created of the resource.
 // Test use only
+// +checklocksexcludewrite:tr.RWMutex
 func (tr *TrackedResource) EqualsDAO(right map[string]map[string]int64) bool {
 	if tr == nil {
 		return len(right) == 0
@@ -128,6 +134,7 @@ func (tr *TrackedResource) EqualsDAO(right map[string]map[string]int64) bool {
 }
 
 // DAOMap converts the TrackedResource into a map structure for use in the REST API.
+// +checklocksexcludewrite:tr.RWMutex
 func (tr *TrackedResource) DAOMap() map[string]map[string]int64 {
 	daoMAP := make(map[string]map[string]int64)
 	if tr != nil {

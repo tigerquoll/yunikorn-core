@@ -43,20 +43,24 @@ import (
 const disableReservation = "DISABLE_RESERVATION"
 
 type ClusterContext struct {
-	partitions     map[string]*PartitionContext
+	// +checklocks:RWMutex
+	partitions map[string]*PartitionContext
+	// +checklocks:RWMutex
 	policyGroup    string
-	rmEventHandler handler.EventHandler
+	rmEventHandler handler.EventHandler // set once during startup and never changed, no lock needed
 	uuid           string
 
 	// config values that change scheduling behaviour
 	needPreemption      bool
 	reservationDisabled bool
 
+	// +checklocks:RWMutex
 	rmInfo    map[string]*RMInformation
 	startTime time.Time
 
 	locking.RWMutex
 
+	// +checklocks:RWMutex
 	lastHealthCheckResult *dao.SchedulerHealthDAOInfo
 }
 
@@ -85,7 +89,8 @@ func NewClusterContext(rmID, policyGroup string, config []byte) (*ClusterContext
 	if cc.reservationDisabled {
 		objects.SetReservationDelay(math.MaxInt64)
 	}
-	err = cc.updateSchedulerConfig(conf, rmID)
+	// the cluster context is still being built and cannot be reached yet, no lock is taken
+	err = cc.updateSchedulerConfig(conf, rmID) // +checklocksignore
 	if err != nil {
 		return nil, err
 	}
@@ -332,6 +337,7 @@ func (cc *ClusterContext) removePartitionsByRMID(event *rmevent.RMPartitionsRemo
 // Locked version of the configuration update called outside of event system.
 // Updates the current config via the config loader.
 // Used in test only, normal updates use the internal call
+// +checklocksexclude:cc.RWMutex
 func (cc *ClusterContext) UpdateRMSchedulerConfig(rmID string, config []byte) error {
 	cc.Lock()
 	defer cc.Unlock()
@@ -357,6 +363,7 @@ func (cc *ClusterContext) UpdateRMSchedulerConfig(rmID string, config []byte) er
 // Called if the config file is updated, indirectly when the webservice is called.
 // During tests this is called outside of the even system to init.
 // unlocked call must only be called holding the ClusterContext lock
+// +checklocks:cc.RWMutex
 func (cc *ClusterContext) updateSchedulerConfig(conf *configs.SchedulerConfig, rmID string) error {
 	visited := map[string]bool{}
 	var err error
@@ -405,18 +412,21 @@ func (cc *ClusterContext) updateSchedulerConfig(conf *configs.SchedulerConfig, r
 }
 
 // Get the config name.
+// +checklocksexcludewrite:cc.RWMutex
 func (cc *ClusterContext) GetPolicyGroup() string {
 	cc.RLock()
 	defer cc.RUnlock()
 	return cc.policyGroup
 }
 
+// +checklocksexcludewrite:cc.RWMutex
 func (cc *ClusterContext) GetStartTime() time.Time {
 	cc.RLock()
 	defer cc.RUnlock()
 	return cc.startTime
 }
 
+// +checklocksexcludewrite:cc.RWMutex
 func (cc *ClusterContext) GetRMInfoMapClone() map[string]*RMInformation {
 	cc.RLock()
 	defer cc.RUnlock()
@@ -428,6 +438,7 @@ func (cc *ClusterContext) GetRMInfoMapClone() map[string]*RMInformation {
 	return newMap
 }
 
+// +checklocksexcludewrite:cc.RWMutex
 func (cc *ClusterContext) GetPartitionMapClone() map[string]*PartitionContext {
 	cc.RLock()
 	defer cc.RUnlock()
@@ -439,12 +450,14 @@ func (cc *ClusterContext) GetPartitionMapClone() map[string]*PartitionContext {
 	return newMap
 }
 
+// +checklocksexcludewrite:cc.RWMutex
 func (cc *ClusterContext) GetPartition(partitionName string) *PartitionContext {
 	cc.RLock()
 	defer cc.RUnlock()
 	return cc.partitions[partitionName]
 }
 
+// +checklocksexcludewrite:cc.RWMutex
 func (cc *ClusterContext) GetPartitionWithoutClusterID(partitionName string) *PartitionContext {
 	cc.RLock()
 	defer cc.RUnlock()
@@ -459,6 +472,7 @@ func (cc *ClusterContext) GetPartitionWithoutClusterID(partitionName string) *Pa
 // Get the scheduling application based on the ID from the partition.
 // Returns nil if the partition or app cannot be found.
 // Visible for tests
+// +checklocksexcludewrite:cc.RWMutex
 func (cc *ClusterContext) GetApplication(appID, partitionName string) *objects.Application {
 	cc.RLock()
 	defer cc.RUnlock()
@@ -473,6 +487,7 @@ func (cc *ClusterContext) GetApplication(appID, partitionName string) *objects.A
 // Get the scheduling queue based on the queue path name from the partition.
 // Returns nil if the partition or queue cannot be found.
 // Visible for tests
+// +checklocksexcludewrite:cc.RWMutex
 func (cc *ClusterContext) GetQueue(queueName string, partitionName string) *objects.Queue {
 	cc.RLock()
 	defer cc.RUnlock()
@@ -575,6 +590,7 @@ func (cc *ClusterContext) handleRMUpdateApplicationEvent(event *rmevent.RMUpdate
 	}
 }
 
+// +checklocksexcludewrite:cc.RWMutex
 func (cc *ClusterContext) NeedPreemption() bool {
 	cc.RLock()
 	defer cc.RUnlock()
@@ -841,6 +857,7 @@ func (cc *ClusterContext) notifyRMAllocationReleased(rmID string, partitionName 
 // Get a scheduling node based on its name from the partition.
 // Returns nil if the partition or node cannot be found.
 // Visible for tests
+// +checklocksexclude:cc.RWMutex
 func (cc *ClusterContext) GetNode(nodeID, partitionName string) *objects.Node {
 	cc.Lock()
 	defer cc.Unlock()
@@ -856,25 +873,31 @@ func (cc *ClusterContext) GetNode(nodeID, partitionName string) *objects.Node {
 }
 
 func (cc *ClusterContext) SetRMInfo(rmID string, rmBuildInformation map[string]string) {
-	if cc.rmInfo == nil {
-		cc.rmInfo = make(map[string]*RMInformation)
+	// YUNIKORN-XXXX: the RM info map is created and written without the cluster context lock while
+	// the DAO path reads it under the read lock. The health check accessors just below do take the
+	// lock, so this is an omission rather than a deliberate lock free path. The fix is to take the
+	// write lock around the map creation and the insert.
+	if cc.rmInfo == nil { // +checklocksignore
+		cc.rmInfo = make(map[string]*RMInformation) // +checklocksignore
 	}
 	buildInfo := make(map[string]string)
 	for k, v := range rmBuildInformation {
 		buildInfo[k] = v
 	}
 	buildInfo["rmId"] = rmID
-	cc.rmInfo[rmID] = &RMInformation{
+	cc.rmInfo[rmID] = &RMInformation{ // +checklocksignore
 		RMBuildInformation: buildInfo,
 	}
 }
 
+// +checklocksexcludewrite:cc.RWMutex
 func (cc *ClusterContext) GetLastHealthCheckResult() *dao.SchedulerHealthDAOInfo {
 	cc.RLock()
 	defer cc.RUnlock()
 	return cc.lastHealthCheckResult
 }
 
+// +checklocksexclude:cc.RWMutex
 func (cc *ClusterContext) SetLastHealthCheckResult(c *dao.SchedulerHealthDAOInfo) {
 	cc.Lock()
 	defer cc.Unlock()
