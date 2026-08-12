@@ -62,6 +62,7 @@ func NewRequiredNodePreemptor(node *Node, requiredAsk *Allocation, application *
 	return preemptor
 }
 
+// +checklocksread:p.application.RWMutex
 func (p *PreemptionContext) tryPreemption() {
 	result := p.filterAllocations()
 	p.sortAllocations()

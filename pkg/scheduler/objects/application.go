@@ -87,43 +87,71 @@ type Application struct {
 	tags          map[string]string // application tags used in scheduling
 
 	// Private mutable fields need protection
-	queuePath         string
-	queue             *Queue                  // queue the application is running in
-	pending           *resources.Resource     // pending resources from asks for the app
-	reservations      map[string]*reservation // a map of reservations
-	requests          map[string]*Allocation  // a map of allocations, pending or satisfied
-	sortedRequests    sortedRequests          // list of requests pre-sorted
-	user              security.UserGroup      // owner of the application
-	allocatedResource *resources.Resource     // total allocated resources
-	submissionTime    time.Time               // time application was submitted (based on the first ask)
+	// +checklocks:RWMutex
+	queuePath string
+	// +checklocks:RWMutex
+	queue *Queue // queue the application is running in
+	// +checklocks:RWMutex
+	pending *resources.Resource // pending resources from asks for the app
+	// +checklocks:RWMutex
+	reservations map[string]*reservation // a map of reservations
+	// +checklocks:RWMutex
+	requests map[string]*Allocation // a map of allocations, pending or satisfied
+	// +checklocks:RWMutex
+	sortedRequests sortedRequests     // list of requests pre-sorted
+	user           security.UserGroup // owner of the application
+	// +checklocks:RWMutex
+	allocatedResource *resources.Resource // total allocated resources
+	// +checklocks:RWMutex
+	submissionTime time.Time // time application was submitted (based on the first ask)
 
-	usedResource        *resources.TrackedResource // keep track of resource usage of the application
-	preemptedResource   *resources.TrackedResource // keep track of preempted resource usage of the application
+	// +checklocks:RWMutex
+	usedResource *resources.TrackedResource // keep track of resource usage of the application
+	// +checklocks:RWMutex
+	preemptedResource *resources.TrackedResource // keep track of preempted resource usage of the application
+	// +checklocks:RWMutex
 	placeholderResource *resources.TrackedResource // keep track of placeholder resource usage of the application
 
-	maxAllocatedResource *resources.Resource         // max allocated resources
-	allocatedPlaceholder *resources.Resource         // total allocated placeholder resources
-	allocations          map[string]*Allocation      // list of all satisfied allocations
-	placeholderAsk       *resources.Resource         // total placeholder request for the app (all task groups)
-	stateMachine         *fsm.FSM                    // application state machine
-	stateTimer           *time.Timer                 // timer for state time
-	execTimeout          time.Duration               // execTimeout for the application run
-	placeholderTimer     *time.Timer                 // placeholder replace timer
-	gangSchedulingStyle  string                      // gang scheduling style can be hard (after timeout we fail the application), or soft (after timeeout we schedule it as a normal application)
-	startTime            time.Time                   // the time that the application starts running. Default is zero.
-	finishedTime         time.Time                   // the time of finishing this application. the default value is zero time
-	rejectedMessage      string                      // If the application is rejected, save the rejected message
-	stateLog             []*StateLogEntry            // state log for this application
-	placeholderData      map[string]*PlaceholderData // track placeholder and gang related info
-	askMaxPriority       int32                       // highest priority value of outstanding asks
-	hasPlaceholderAlloc  bool                        // Whether there is at least one allocated placeholder
-	runnableInQueue      bool                        // whether the application is runnable/schedulable in the queue. Default is true.
-	runnableByUserLimit  bool                        // whether the application is runnable/schedulable based on user/group quota. Default is true.
-	backoffDeadline      time.Time                   // no scheduling from this application until this deadline
+	// +checklocks:RWMutex
+	maxAllocatedResource *resources.Resource // max allocated resources
+	// +checklocks:RWMutex
+	allocatedPlaceholder *resources.Resource // total allocated placeholder resources
+	// +checklocks:RWMutex
+	allocations    map[string]*Allocation // list of all satisfied allocations
+	placeholderAsk *resources.Resource    // total placeholder request for the app (all task groups)
+	stateMachine   *fsm.FSM               // application state machine
+	// +checklocks:RWMutex
+	stateTimer  *time.Timer   // timer for state time
+	execTimeout time.Duration // execTimeout for the application run
+	// +checklocks:RWMutex
+	placeholderTimer    *time.Timer // placeholder replace timer
+	gangSchedulingStyle string      // gang scheduling style can be hard (after timeout we fail the application), or soft (after timeeout we schedule it as a normal application)
+	// +checklocks:RWMutex
+	startTime time.Time // the time that the application starts running. Default is zero.
+	// +checklocks:RWMutex
+	finishedTime time.Time // the time of finishing this application. the default value is zero time
+	// +checklocks:RWMutex
+	rejectedMessage string // If the application is rejected, save the rejected message
+	// +checklocks:RWMutex
+	stateLog []*StateLogEntry // state log for this application
+	// +checklocks:RWMutex
+	placeholderData map[string]*PlaceholderData // track placeholder and gang related info
+	// +checklocks:RWMutex
+	askMaxPriority int32 // highest priority value of outstanding asks
+	// +checklocks:RWMutex
+	hasPlaceholderAlloc bool // Whether there is at least one allocated placeholder
+	// +checklocks:RWMutex
+	runnableInQueue bool // whether the application is runnable/schedulable in the queue. Default is true.
+	// +checklocks:RWMutex
+	runnableByUserLimit bool // whether the application is runnable/schedulable based on user/group quota. Default is true.
+	// +checklocks:RWMutex
+	backoffDeadline time.Time // no scheduling from this application until this deadline
 
-	rmEventHandler              handler.EventHandler
-	rmID                        string
-	terminatedCallback          func(appID string)
+	rmEventHandler handler.EventHandler
+	rmID           string
+	// +checklocks:RWMutex
+	terminatedCallback func(appID string)
+	// +checklocks:RWMutex
 	reservationReleasedCallback func(released int)
 	appEvents                   *schedEvt.ApplicationEvents
 	sendStateChangeEvents       bool // whether to send state-change events or not (simplifies testing)
@@ -189,6 +217,7 @@ func (sa *Application) SetState(state string) {
 	sa.stateMachine.SetState(state)
 }
 
+// +checklocks:sa.RWMutex
 func (sa *Application) recordState(appState string) {
 	// lock not acquired here as it is already held during HandleApplicationEvent() / OnStateChange()
 	sa.stateLog = append(sa.stateLog, &StateLogEntry{
@@ -197,6 +226,7 @@ func (sa *Application) recordState(appState string) {
 	})
 }
 
+// +checklocksexcludewrite:sa.RWMutex
 func (sa *Application) GetStateLog() []*StateLogEntry {
 	sa.RLock()
 	defer sa.RUnlock()
@@ -282,6 +312,7 @@ func (sa *Application) HandleApplicationEventWithInfo(event applicationEvent, ev
 // OnStatChange every time the application enters a new state.
 // It sends an event about the state change to the shim as an application update.
 // The only state that does not generate an event is Rejected.
+// +checklocks:sa.RWMutex
 func (sa *Application) OnStateChange(event *fsm.Event, eventInfo string) {
 	sa.recordState(event.Dst)
 	if event.Dst == Rejected.String() || sa.rmEventHandler == nil {
@@ -310,6 +341,7 @@ func (sa *Application) OnStateChange(event *fsm.Event, eventInfo string) {
 // Set the state timer to make sure the application will not get stuck in a time-sensitive state too long.
 // This prevents an app from not progressing to the next state if a timeout is required.
 // Used for placeholder timeout and completion handling.
+// +checklocks:sa.RWMutex
 func (sa *Application) setStateTimer(timeout time.Duration, currentState string, event applicationEvent) {
 	log.Log(log.SchedApplication).Debug("Application state timer initiated",
 		zap.String("appID", sa.ApplicationID),
@@ -368,6 +400,7 @@ func (sa *Application) timeoutStateTimer(expectedState string, event application
 
 // Clear the state timer. If the application has progressed out of a time-sensitive state we need to stop the timer and
 // clean up. Called when transitioning from Completed to Completing or when expiring an application.
+// +checklocks:sa.RWMutex
 func (sa *Application) clearStateTimer() {
 	if sa == nil || sa.stateTimer == nil {
 		return
@@ -379,6 +412,7 @@ func (sa *Application) clearStateTimer() {
 		zap.String("state", sa.stateMachine.Current()))
 }
 
+// +checklocks:sa.RWMutex
 func (sa *Application) initPlaceholderTimer() {
 	if sa.placeholderTimer != nil || !sa.IsAccepted() || sa.execTimeout <= 0 {
 		return
@@ -389,6 +423,7 @@ func (sa *Application) initPlaceholderTimer() {
 	sa.placeholderTimer = time.AfterFunc(sa.execTimeout, sa.timeoutPlaceholderProcessing)
 }
 
+// +checklocks:sa.RWMutex
 func (sa *Application) clearPlaceholderTimer() {
 	if sa == nil || sa.placeholderTimer == nil {
 		return
@@ -497,6 +532,7 @@ func (sa *Application) timeoutPlaceholderProcessing() {
 // GetReservations returns an array of all reservation keys for the application.
 // This will return an empty array if there are no reservations.
 // Visible for tests
+// +checklocksexcludewrite:sa.RWMutex
 func (sa *Application) GetReservations() []string {
 	sa.RLock()
 	defer sa.RUnlock()
@@ -510,6 +546,7 @@ func (sa *Application) GetReservations() []string {
 }
 
 // GetAllocationAsk returns the allocation alloc for the key, nil if not found
+// +checklocksexcludewrite:sa.RWMutex
 func (sa *Application) GetAllocationAsk(allocationKey string) *Allocation {
 	sa.RLock()
 	defer sa.RUnlock()
@@ -518,6 +555,7 @@ func (sa *Application) GetAllocationAsk(allocationKey string) *Allocation {
 
 // GetAllocationNodeID returns the node ID for a confirmed allocation identified by allocationKey.
 // Returns an empty string if the allocation does not exist.
+// +checklocksexcludewrite:sa.RWMutex
 func (sa *Application) GetAllocationNodeID(allocationKey string) string {
 	sa.RLock()
 	defer sa.RUnlock()
@@ -528,6 +566,7 @@ func (sa *Application) GetAllocationNodeID(allocationKey string) string {
 }
 
 // GetAllocatedResource returns the currently allocated resources for this application
+// +checklocksexcludewrite:sa.RWMutex
 func (sa *Application) GetAllocatedResource() *resources.Resource {
 	sa.RLock()
 	defer sa.RUnlock()
@@ -535,6 +574,7 @@ func (sa *Application) GetAllocatedResource() *resources.Resource {
 }
 
 // GetMaxAllocatedResource returns the peak of the allocated resources for this application
+// +checklocksexcludewrite:sa.RWMutex
 func (sa *Application) GetMaxAllocatedResource() *resources.Resource {
 	sa.RLock()
 	defer sa.RUnlock()
@@ -542,6 +582,7 @@ func (sa *Application) GetMaxAllocatedResource() *resources.Resource {
 }
 
 // GetPlaceholderResource returns the currently allocated placeholder resources for this application
+// +checklocksexcludewrite:sa.RWMutex
 func (sa *Application) GetPlaceholderResource() *resources.Resource {
 	sa.RLock()
 	defer sa.RUnlock()
@@ -550,6 +591,7 @@ func (sa *Application) GetPlaceholderResource() *resources.Resource {
 
 // GetPlaceholderAsk returns the total placeholder resource request for this application
 // Is only set on app creation and used when app is added to a queue
+// +checklocksexcludewrite:sa.RWMutex
 func (sa *Application) GetPlaceholderAsk() *resources.Resource {
 	sa.RLock()
 	defer sa.RUnlock()
@@ -557,6 +599,7 @@ func (sa *Application) GetPlaceholderAsk() *resources.Resource {
 }
 
 // Return the pending resources for this application
+// +checklocksexcludewrite:sa.RWMutex
 func (sa *Application) GetPendingResource() *resources.Resource {
 	sa.RLock()
 	defer sa.RUnlock()
@@ -566,6 +609,7 @@ func (sa *Application) GetPendingResource() *resources.Resource {
 // RemoveAllocationAsk removes one or more allocation asks from this application.
 // This also removes any reservations that are linked to the allocations.
 // The return value is the number of reservations released
+// +checklocksexclude:sa.RWMutex
 func (sa *Application) RemoveAllocationAsk(allocKey string) int {
 	sa.Lock()
 	defer sa.Unlock()
@@ -573,6 +617,7 @@ func (sa *Application) RemoveAllocationAsk(allocKey string) int {
 }
 
 // unlocked version of the allocation ask removal
+// +checklocks:sa.RWMutex
 func (sa *Application) removeAsksInternal(allocKey string, detail si.EventRecord_ChangeDetail) int {
 	// shortcut no need to do anything
 	if len(sa.requests) == 0 {
@@ -647,6 +692,7 @@ func (sa *Application) removeAsksInternal(allocKey string, detail si.EventRecord
 
 // Add an allocation ask to this application
 // If the ask already exist update the existing info
+// +checklocksexclude:sa.RWMutex
 func (sa *Application) AddAllocationAsk(ask *Allocation) error {
 	sa.Lock()
 	defer sa.Unlock()
@@ -699,6 +745,7 @@ func (sa *Application) AddAllocationAsk(ask *Allocation) error {
 
 // UpdateAllocationResources updates the app, queue, and user tracker with deltas for an allocation.
 // If an existing allocation cannot be found or alloc is invalid, an error is returned.
+// +checklocksexclude:sa.RWMutex
 func (sa *Application) UpdateAllocationResources(alloc *Allocation, isQuotaPreemptionEnabled bool) error {
 	sa.Lock()
 	defer sa.Unlock()
@@ -760,6 +807,7 @@ func (sa *Application) UpdateAllocationResources(alloc *Allocation, isQuotaPreem
 
 // Add the ask when a node allocation is recovered.
 // Safeguarded against a nil but the recovery generates the ask and should never be nil.
+// +checklocksexclude:sa.RWMutex
 func (sa *Application) RecoverAllocationAsk(alloc *Allocation) {
 	sa.Lock()
 	defer sa.Unlock()
@@ -778,6 +826,7 @@ func (sa *Application) RecoverAllocationAsk(alloc *Allocation) {
 	}
 }
 
+// +checklocks:sa.RWMutex
 func (sa *Application) addAllocationAskInternal(ask *Allocation) {
 	sa.requests[ask.GetAllocationKey()] = ask
 
@@ -794,6 +843,7 @@ func (sa *Application) addAllocationAskInternal(ask *Allocation) {
 	}
 }
 
+// +checklocksexclude:sa.RWMutex
 func (sa *Application) AllocateAsk(allocKey string) (*resources.Resource, error) {
 	sa.Lock()
 	defer sa.Unlock()
@@ -803,6 +853,7 @@ func (sa *Application) AllocateAsk(allocKey string) (*resources.Resource, error)
 	return nil, fmt.Errorf("failed to locate ask with key %s", allocKey)
 }
 
+// +checklocksexclude:sa.RWMutex
 func (sa *Application) DeallocateAsk(allocKey string) (*resources.Resource, error) {
 	sa.Lock()
 	defer sa.Unlock()
@@ -816,6 +867,7 @@ func (sa *Application) DeallocateAsk(allocKey string) (*resources.Resource, erro
 // This is used when the shim fails to bind a pod after the core has allocated it,
 // allowing the task to be re-scheduled on a different node.
 // The application must be in Accepted or Running state for rollback to succeed.
+// +checklocksexclude:sa.RWMutex
 func (sa *Application) RollbackAllocation(allocKey string) (*resources.Resource, error) {
 	sa.Lock()
 	defer sa.Unlock()
@@ -853,6 +905,7 @@ func (sa *Application) RollbackAllocation(allocKey string) (*resources.Resource,
 	return res, nil
 }
 
+// +checklocks:sa.RWMutex
 func (sa *Application) allocateAsk(ask *Allocation) (*resources.Resource, error) {
 	if !ask.allocate() {
 		return nil, fmt.Errorf("unable to allocate previously allocated ask %s on app %s", ask.GetAllocationKey(), sa.ApplicationID)
@@ -872,6 +925,7 @@ func (sa *Application) allocateAsk(ask *Allocation) (*resources.Resource, error)
 	return delta, nil
 }
 
+// +checklocks:sa.RWMutex
 func (sa *Application) deallocateAsk(ask *Allocation) (*resources.Resource, error) {
 	if !ask.deallocate() {
 		return nil, fmt.Errorf("unable to deallocate pending ask %s on app %s", ask.GetAllocationKey(), sa.ApplicationID)
@@ -893,6 +947,7 @@ func (sa *Application) deallocateAsk(ask *Allocation) (*resources.Resource, erro
 }
 
 // HasReserved returns true if the application has any reservations.
+// +checklocksexcludewrite:sa.RWMutex
 func (sa *Application) HasReserved() bool {
 	sa.RLock()
 	defer sa.RUnlock()
@@ -901,6 +956,7 @@ func (sa *Application) HasReserved() bool {
 
 // NodeReservedForAsk returns the nodeID that has been reserved by the application for the ask
 // An empty nodeID means the ask is not reserved. An empty askKey is never reserved.
+// +checklocksexcludewrite:sa.RWMutex
 func (sa *Application) NodeReservedForAsk(askKey string) string {
 	sa.RLock()
 	defer sa.RUnlock()
@@ -913,6 +969,7 @@ func (sa *Application) NodeReservedForAsk(askKey string) string {
 // Reserve the application for this node and alloc combination.
 // If the reservation fails the function returns false, if the reservation is made it returns true.
 // If the node and alloc combination was already reserved for the application this is a noop and returns true.
+// +checklocksexclude:sa.RWMutex
 func (sa *Application) Reserve(node *Node, ask *Allocation) error {
 	if node == nil || ask == nil {
 		return fmt.Errorf("reservation creation failed node or alloc are nil on appID %s", sa.ApplicationID)
@@ -924,6 +981,7 @@ func (sa *Application) Reserve(node *Node, ask *Allocation) error {
 
 // reserveInternal is the unlocked version for Reserve that really does the work.
 // Must only be called while holding the application lock.
+// +checklocks:sa.RWMutex
 func (sa *Application) reserveInternal(node *Node, ask *Allocation) error {
 	allocKey := ask.GetAllocationKey()
 	if sa.requests[allocKey] == nil {
@@ -960,6 +1018,7 @@ func (sa *Application) reserveInternal(node *Node, ask *Allocation) error {
 // UnReserve the application for this node and alloc combination.
 // If the reservation does not exist it returns 0 for reservations removed, if the reservation is removed it returns 1.
 // The error is set if the reservation key cannot be removed from the app or node.
+// +checklocksexclude:sa.RWMutex
 func (sa *Application) UnReserve(node *Node, ask *Allocation) int {
 	log.Log(log.SchedApplication).Info("unreserving allocation from application",
 		zap.String("appID", sa.ApplicationID),
@@ -989,6 +1048,7 @@ func (sa *Application) UnReserve(node *Node, ask *Allocation) int {
 // Unlocked version for UnReserve that really does the work.
 // This is idempotent and will not fail
 // Must only be called while holding the application lock.
+// +checklocks:sa.RWMutex
 func (sa *Application) unReserveInternal(reserve *reservation) int {
 	// this should not happen
 	if reserve == nil {
@@ -1023,6 +1083,7 @@ func (sa *Application) unReserveInternal(reserve *reservation) int {
 
 // canAllocationReserve Check if the allocation has already been reserved. An alloc can never reserve more than one node.
 // No locking must be called while holding the lock
+// +checklocksread:sa.RWMutex
 func (sa *Application) canAllocationReserve(alloc *Allocation) error {
 	allocKey := alloc.GetAllocationKey()
 	if alloc.IsAllocated() {
@@ -1068,6 +1129,7 @@ func (sa *Application) getOutstandingRequests(headRoom *resources.Resource, user
 
 // canReplace returns true if there is a placeholder for the task group available for the request.
 // False for all other cases. Placeholder replacements are handled separately from normal allocations.
+// +checklocksread:sa.RWMutex
 func (sa *Application) canReplace(request *Allocation) bool {
 	// a placeholder or a request without task group can never replace a placeholder
 	if request == nil || request.IsPlaceholder() || request.GetTaskGroup() == "" {
@@ -1180,6 +1242,7 @@ func (sa *Application) tryAllocate(headRoom *resources.Resource, allowPreemption
 // tryRequiredNode tries to place the allocation in the specific node that is set as the required node in the allocation.
 // The first time the allocation is seen it will try to make the allocation on the node. If that does not work it will
 // always trigger the reservation of the node.
+// +checklocks:sa.RWMutex
 func (sa *Application) tryRequiredNode(request *Allocation, getNodeFn func(string) *Node) *AllocationResult {
 	requiredNode := request.GetRequiredNode()
 	allocationKey := request.GetAllocationKey()
@@ -1231,6 +1294,7 @@ func (sa *Application) tryRequiredNode(request *Allocation, getNodeFn func(strin
 
 // unreserveForApp handles the lock-aware unreserve for a single reservation.
 // Uses the internal unlocked path when the reservation belongs to this app.
+// +checklocks:sa.RWMutex
 func (sa *Application) unreserveForApp(res *reservation) int {
 	var num int
 	if sa.ApplicationID == res.appID {
@@ -1252,6 +1316,7 @@ func (sa *Application) unreserveForApp(res *reservation) int {
 
 // cancelMatchingReservations cancels reservations that match the predicate.
 // Returns the number of reservations released and the number remaining.
+// +checklocks:sa.RWMutex
 func (sa *Application) cancelMatchingReservations(reservations []*reservation, shouldCancel func(*reservation) bool) (released, remaining int) {
 	remaining = len(reservations)
 	for _, res := range reservations {
@@ -1268,6 +1333,7 @@ func (sa *Application) cancelMatchingReservations(reservations []*reservation, s
 // cancelReservations will cancel all non required node reservations for a node. The list of reservations passed in is
 // a copy of all reservations of a single node. This is called during the required node allocation cycle only.
 // The returned int value is used to update the partition counter of active reservations.
+// +checklocks:sa.RWMutex
 func (sa *Application) cancelReservations(reservations []*reservation) int {
 	released, _ := sa.cancelMatchingReservations(reservations, func(res *reservation) bool {
 		return res.alloc.requiredNode == ""
@@ -1407,7 +1473,9 @@ func (sa *Application) tryPlaceholderAllocate(nodeIterator func() NodeIterator, 
 					zap.Stringer("placeholder", phFit))
 				return false
 			}
-			_, err := sa.allocateAsk(reqFit)
+			// the closure runs inside the ForEachNode / iterator callback of the enclosing locked
+			// method: the lock is held but the analysis does not follow facts into a closure
+			_, err := sa.allocateAsk(reqFit) // +checklocksignore
 			if err != nil {
 				log.Log(log.SchedApplication).Warn("allocation of ask failed unexpectedly",
 					zap.Error(err))
@@ -1437,7 +1505,8 @@ func (sa *Application) tryPlaceholderAllocate(nodeIterator func() NodeIterator, 
 				}
 
 				// revert: allocate ask
-				_, err = sa.deallocateAsk(reqFit)
+				// lock held by the enclosing method, facts do not reach the closure
+				_, err = sa.deallocateAsk(reqFit) // +checklocksignore
 				if err != nil {
 					log.Log(log.SchedApplication).Warn("deallocation of ask failed unexpectedly",
 						zap.Error(err))
@@ -1515,7 +1584,9 @@ func (sa *Application) tryReservedAllocate(headRoom *resources.Resource, nodeIte
 			if !reserve.node.CanAllocate(ask.GetAllocatedResource()) && !ask.HasTriggeredPreemption() {
 				// try preemption and see if we can free up resource
 				preemptor := NewRequiredNodePreemptor(reserve.node, ask, sa)
-				preemptor.tryPreemption()
+				// the preemptor was built from sa above, the application lock is held here but the
+				// analysis cannot tie the field of the new object back to the receiver
+				preemptor.tryPreemption() // +checklocksignore
 				continue
 			}
 		}
@@ -1552,6 +1623,7 @@ func (sa *Application) tryReservedAllocate(headRoom *resources.Resource, nodeIte
 	return nil
 }
 
+// +checklocks:sa.RWMutex
 func (sa *Application) tryPreemption(headRoom *resources.Resource, preemptionDelay time.Duration, preemptionAttemptsRemaining *int, ask *Allocation, iterator NodeIterator, nodesTried bool) (*AllocationResult, bool) {
 	if *preemptionAttemptsRemaining == 0 {
 		log.Log(log.SchedApplication).Debug("Max queue preemption attempts exhausted",
@@ -1575,7 +1647,8 @@ func (sa *Application) tryPreemption(headRoom *resources.Resource, preemptionDel
 	defer metrics.GetSchedulerMetrics().ObserveTryPreemptionLatency(tryPreemptionStart)
 
 	// attempt preemption
-	return preemptor.TryPreemption()
+	// same aliasing limit as above: preemptor.application is sa and its lock is held
+	return preemptor.TryPreemption() // +checklocksignore
 }
 
 // tryNodesNoReserve tries all the nodes for a reserved request that have not been tried yet.
@@ -1594,7 +1667,9 @@ func (sa *Application) tryNodesNoReserve(ask *Allocation, iterator NodeIterator,
 			return true
 		}
 		// we don't care about predicate error messages here
-		result, _ := sa.tryNode(node, ask) //nolint:errcheck
+		// lock held by the enclosing method, facts do not reach the closure
+		//nolint:errcheck
+		result, _ := sa.tryNode(node, ask) // +checklocksignore
 		// allocation worked: update resultType and return
 		if result != nil {
 			result.ResultType = AllocatedReserved
@@ -1611,6 +1686,7 @@ func (sa *Application) tryNodesNoReserve(ask *Allocation, iterator NodeIterator,
 
 // Try all the nodes for a request. The resultType is an allocation or reservation of a node.
 // New allocations can only be reserved after a delay.
+// +checklocksread:sa.RWMutex
 func (sa *Application) tryNodes(ask *Allocation, iterator NodeIterator) *AllocationResult {
 	var nodeToReserve *Node
 	scoreReserved := math.Inf(1)
@@ -1633,7 +1709,8 @@ func (sa *Application) tryNodes(ask *Allocation, iterator NodeIterator) *Allocat
 			return true
 		}
 		tryNodeStart := time.Now()
-		result, err := sa.tryNode(node, ask)
+		// lock held by the enclosing method, facts do not reach the closure
+		result, err := sa.tryNode(node, ask) // +checklocksignore
 		if err != nil {
 			if predicateErrors == nil {
 				predicateErrors = make(map[string]int)
@@ -1714,6 +1791,7 @@ func (sa *Application) tryNodes(ask *Allocation, iterator NodeIterator) *Allocat
 }
 
 // tryNode tries allocating on one specific node
+// +checklocks:sa.RWMutex
 func (sa *Application) tryNode(node *Node, ask *Allocation) (*AllocationResult, error) {
 	toAllocate := ask.GetAllocatedResource()
 	allocationKey := ask.GetAllocationKey()
@@ -1750,12 +1828,14 @@ func (sa *Application) tryNode(node *Node, ask *Allocation) (*AllocationResult, 
 	return nil, nil
 }
 
+// +checklocksexcludewrite:sa.RWMutex
 func (sa *Application) GetQueuePath() string {
 	sa.RLock()
 	defer sa.RUnlock()
 	return sa.queuePath
 }
 
+// +checklocksexcludewrite:sa.RWMutex
 func (sa *Application) GetQueue() *Queue {
 	sa.RLock()
 	defer sa.RUnlock()
@@ -1764,6 +1844,7 @@ func (sa *Application) GetQueue() *Queue {
 
 // Set the leaf queue the application runs in. The queue will be created when the app is added to the partition.
 // The queue name is set to what the placement rule returned.
+// +checklocksexclude:sa.RWMutex
 func (sa *Application) SetQueuePath(queuePath string) {
 	sa.Lock()
 	defer sa.Unlock()
@@ -1771,6 +1852,7 @@ func (sa *Application) SetQueuePath(queuePath string) {
 }
 
 // Set the leaf queue the application runs in.
+// +checklocksexclude:sa.RWMutex
 func (sa *Application) SetQueue(queue *Queue) {
 	sa.Lock()
 	defer sa.Unlock()
@@ -1782,9 +1864,15 @@ func (sa *Application) SetQueue(queue *Queue) {
 }
 
 // remove the leaf queue the application runs in, used when completing the app
+// +checklocksexclude:sa.RWMutex
 func (sa *Application) UnSetQueue() {
-	if sa.queue != nil {
-		sa.queue.RemoveApplication(sa)
+	// YUNIKORN-XXXX: the guarded queue field is read and used before the application lock is
+	// taken. The lock deliberately cannot be held over RemoveApplication, that would nest the
+	// queue lock inside the application lock and invert the documented order, but the field
+	// read itself is unsynchronised against a concurrent SetQueue. The fix is to snapshot the
+	// queue through GetQueue() first and act on the snapshot.
+	if sa.queue != nil { // +checklocksignore
+		sa.queue.RemoveApplication(sa) // +checklocksignore
 	}
 	sa.Lock()
 	defer sa.Unlock()
@@ -1792,12 +1880,14 @@ func (sa *Application) UnSetQueue() {
 	sa.finishedTime = time.Now()
 }
 
+// +checklocksexcludewrite:sa.RWMutex
 func (sa *Application) StartTime() time.Time {
 	sa.RLock()
 	defer sa.RUnlock()
 	return sa.startTime
 }
 
+// +checklocksexcludewrite:sa.RWMutex
 func (sa *Application) FinishedTime() time.Time {
 	sa.RLock()
 	defer sa.RUnlock()
@@ -1805,6 +1895,7 @@ func (sa *Application) FinishedTime() time.Time {
 }
 
 // get a copy of all allocations of the application
+// +checklocksexcludewrite:sa.RWMutex
 func (sa *Application) GetAllAllocations() []*Allocation {
 	sa.RLock()
 	defer sa.RUnlock()
@@ -1818,6 +1909,7 @@ func (sa *Application) GetAllAllocations() []*Allocation {
 
 // get a copy of all placeholder allocations of the application
 // No locking must be called while holding the lock
+// +checklocksread:sa.RWMutex
 func (sa *Application) getPlaceholderAllocations() []*Allocation {
 	var allocations []*Allocation
 	if sa == nil || len(sa.allocations) == 0 {
@@ -1832,12 +1924,14 @@ func (sa *Application) getPlaceholderAllocations() []*Allocation {
 }
 
 // GetAllRequests returns a copy of all requests of the application
+// +checklocksexcludewrite:sa.RWMutex
 func (sa *Application) GetAllRequests() []*Allocation {
 	sa.RLock()
 	defer sa.RUnlock()
 	return sa.getAllRequestsInternal()
 }
 
+// +checklocksread:sa.RWMutex
 func (sa *Application) getAllRequestsInternal() []*Allocation {
 	var requests []*Allocation
 	for _, req := range sa.requests {
@@ -1847,6 +1941,7 @@ func (sa *Application) getAllRequestsInternal() []*Allocation {
 }
 
 // Add a new Allocation to the application
+// +checklocksexclude:sa.RWMutex
 func (sa *Application) AddAllocation(alloc *Allocation) {
 	sa.Lock()
 	defer sa.Unlock()
@@ -1855,6 +1950,7 @@ func (sa *Application) AddAllocation(alloc *Allocation) {
 
 // Add the Allocation to the application
 // No locking must be called while holding the lock
+// +checklocks:sa.RWMutex
 func (sa *Application) addAllocationInternal(allocType AllocationResultType, alloc *Allocation) {
 	// placeholder allocations do not progress the state of the app and are tracked in a separate total
 	if alloc.IsPlaceholder() {
@@ -1907,17 +2003,20 @@ func (sa *Application) addAllocationInternal(allocType AllocationResultType, all
 
 // Increase user resource usage
 // No locking must be called while holding the lock
+// +checklocksread:sa.RWMutex
 func (sa *Application) incUserResourceUsage(resource *resources.Resource) {
 	ugm.GetUserManager().IncreaseTrackedResource(sa.queuePath, sa.ApplicationID, resource, sa.user)
 }
 
 // Decrease user resource usage
 // No locking must be called while holding the lock
+// +checklocksread:sa.RWMutex
 func (sa *Application) decUserResourceUsage(resource *resources.Resource, removeApp bool) {
 	ugm.GetUserManager().DecreaseTrackedResource(sa.queuePath, sa.ApplicationID, resource, sa.user, removeApp)
 }
 
 // Track used and preempted resources
+// +checklocksread:sa.RWMutex
 func (sa *Application) trackCompletedResource(info *Allocation) {
 	switch {
 	case info.IsPreempted():
@@ -1931,6 +2030,7 @@ func (sa *Application) trackCompletedResource(info *Allocation) {
 
 // When the resource allocated with this allocation is to be removed,
 // have the usedResource to aggregate the resource used by this allocation
+// +checklocksread:sa.RWMutex
 func (sa *Application) updateUsedResource(info *Allocation) {
 	sa.usedResource.AggregateTrackedResource(info.GetInstanceType(),
 		info.GetAllocatedResource(), info.GetBindTime())
@@ -1938,6 +2038,7 @@ func (sa *Application) updateUsedResource(info *Allocation) {
 
 // When the placeholder allocated with this allocation is to be removed,
 // have the placeholderResource to aggregate the resource used by this allocation
+// +checklocksread:sa.RWMutex
 func (sa *Application) updatePlaceholderResource(info *Allocation) {
 	sa.placeholderResource.AggregateTrackedResource(info.GetInstanceType(),
 		info.GetAllocatedResource(), info.GetBindTime())
@@ -1945,6 +2046,7 @@ func (sa *Application) updatePlaceholderResource(info *Allocation) {
 
 // When the resource allocated with this allocation is to be preempted,
 // have the preemptedResource to aggregate the resource used by this allocation
+// +checklocksread:sa.RWMutex
 func (sa *Application) updatePreemptedResource(info *Allocation) {
 	sa.preemptedResource.AggregateTrackedResource(info.GetInstanceType(),
 		info.GetAllocatedResource(), info.GetBindTime())
@@ -1953,6 +2055,7 @@ func (sa *Application) updatePreemptedResource(info *Allocation) {
 // ReplaceAllocation removes the placeholder from the allocation list and replaces it with the real allocation.
 // If no replacing allocation is linked to the placeholder it will still be removed from the application.
 // Queue and Node objects are updated by the caller.
+// +checklocksexclude:sa.RWMutex
 func (sa *Application) ReplaceAllocation(allocationKey string) *Allocation {
 	sa.Lock()
 	defer sa.Unlock()
@@ -1984,6 +2087,7 @@ func (sa *Application) ReplaceAllocation(allocationKey string) *Allocation {
 
 // RemoveAllocation removes the Allocation from the application.
 // Return the allocation that was removed or nil if not found.
+// +checklocksexclude:sa.RWMutex
 func (sa *Application) RemoveAllocation(allocationKey string, releaseType si.TerminationType) *Allocation {
 	sa.Lock()
 	defer sa.Unlock()
@@ -1993,6 +2097,7 @@ func (sa *Application) RemoveAllocation(allocationKey string, releaseType si.Ter
 // removeAllocationInternal removes the Allocation from the application.
 // Returns the allocation that was removed or nil if not found.
 // No locking must be called while holding the application lock.
+// +checklocks:sa.RWMutex
 func (sa *Application) removeAllocationInternal(allocationKey string, releaseType si.TerminationType) *Allocation {
 	alloc := sa.allocations[allocationKey]
 
@@ -2071,6 +2176,7 @@ func (sa *Application) removeAllocationInternal(allocationKey string, releaseTyp
 	return alloc
 }
 
+// +checklocks:sa.RWMutex
 func (sa *Application) updateAskMaxPriority() {
 	value := configs.MinPriority
 	for _, v := range sa.requests {
@@ -2083,12 +2189,14 @@ func (sa *Application) updateAskMaxPriority() {
 	sa.queue.UpdateApplicationPriority(sa.ApplicationID, value)
 }
 
+// +checklocksread:sa.RWMutex
 func (sa *Application) hasZeroAllocations() bool {
 	return resources.IsZero(sa.pending) && resources.IsZero(sa.allocatedResource)
 }
 
 // RemoveAllAllocations removes all allocations from the application.
 // All allocations that have been removed are returned.
+// +checklocksexclude:sa.RWMutex
 func (sa *Application) RemoveAllAllocations() []*Allocation {
 	sa.Lock()
 	defer sa.Unlock()
@@ -2135,6 +2243,7 @@ func (sa *Application) RemoveAllAllocations() []*Allocation {
 }
 
 // RejectApplication rejects this application.
+// +checklocksexclude:sa.RWMutex
 func (sa *Application) RejectApplication(rejectedMessage string) error {
 	sa.Lock()
 	defer sa.Unlock()
@@ -2143,6 +2252,7 @@ func (sa *Application) RejectApplication(rejectedMessage string) error {
 }
 
 // FailApplication fails this application.
+// +checklocksexclude:sa.RWMutex
 func (sa *Application) FailApplication(failureMessage string) error {
 	sa.Lock()
 	defer sa.Unlock()
@@ -2151,6 +2261,7 @@ func (sa *Application) FailApplication(failureMessage string) error {
 }
 
 // get a copy of the user details for the application
+// +checklocksexcludewrite:sa.RWMutex
 func (sa *Application) GetUser() security.UserGroup {
 	sa.RLock()
 	defer sa.RUnlock()
@@ -2175,24 +2286,28 @@ func (sa *Application) IsCreateForced() bool {
 	return common.IsAppCreationForced(sa.tags)
 }
 
+// +checklocksexclude:sa.RWMutex
 func (sa *Application) SetTerminatedCallback(callback func(appID string)) {
 	sa.Lock()
 	defer sa.Unlock()
 	sa.terminatedCallback = callback
 }
 
+// +checklocksread:sa.RWMutex
 func (sa *Application) executeTerminatedCallback() {
 	if sa.terminatedCallback != nil {
 		go sa.terminatedCallback(sa.ApplicationID)
 	}
 }
 
+// +checklocksexclude:sa.RWMutex
 func (sa *Application) SetReservationReleasedCallback(callback func(released int)) {
 	sa.Lock()
 	defer sa.Unlock()
 	sa.reservationReleasedCallback = callback
 }
 
+// +checklocksread:sa.RWMutex
 func (sa *Application) executeReservationReleasedCallback(released int) {
 	if released > 0 && sa.reservationReleasedCallback != nil {
 		go sa.reservationReleasedCallback(released)
@@ -2202,6 +2317,7 @@ func (sa *Application) executeReservationReleasedCallback(released int) {
 // notifyRMAllocationReleased send an allocation release event to the RM to if the event handler is configured
 // and at least one allocation has been released.
 // No locking must be called while holding the lock
+// +checklocksread:sa.RWMutex
 func (sa *Application) notifyRMAllocationReleased(released []*Allocation, terminationType si.TerminationType, message string) {
 	// only generate event if needed
 	if len(released) == 0 || sa.rmEventHandler == nil {
@@ -2232,6 +2348,7 @@ func (sa *Application) notifyRMAllocationReleased(released []*Allocation, termin
 	}
 }
 
+// +checklocksexcludewrite:sa.RWMutex
 func (sa *Application) IsAllocationAssignedToApp(alloc *Allocation) bool {
 	sa.RLock()
 	defer sa.RUnlock()
@@ -2239,12 +2356,14 @@ func (sa *Application) IsAllocationAssignedToApp(alloc *Allocation) bool {
 	return ok
 }
 
+// +checklocksexcludewrite:sa.RWMutex
 func (sa *Application) GetRejectedMessage() string {
 	sa.RLock()
 	defer sa.RUnlock()
 	return sa.rejectedMessage
 }
 
+// +checklocks:sa.RWMutex
 func (sa *Application) addPlaceholderData(ask *Allocation) {
 	if sa.placeholderData == nil {
 		sa.placeholderData = make(map[string]*PlaceholderData)
@@ -2259,6 +2378,7 @@ func (sa *Application) addPlaceholderData(ask *Allocation) {
 	sa.placeholderData[taskGroupName].Count++
 }
 
+// +checklocksexcludewrite:sa.RWMutex
 func (sa *Application) GetAllPlaceholderData() []*PlaceholderData {
 	sa.RLock()
 	defer sa.RUnlock()
@@ -2269,17 +2389,20 @@ func (sa *Application) GetAllPlaceholderData() []*PlaceholderData {
 	return placeholders
 }
 
+// +checklocksexcludewrite:sa.RWMutex
 func (sa *Application) GetAskMaxPriority() int32 {
 	sa.RLock()
 	defer sa.RUnlock()
 	return sa.askMaxPriority
 }
 
+// +checklocks:sa.RWMutex
 func (sa *Application) cleanupAsks() {
 	sa.requests = make(map[string]*Allocation)
 	sa.sortedRequests = nil
 }
 
+// +checklocks:sa.RWMutex
 func (sa *Application) cleanupTrackedResource() {
 	sa.usedResource = nil
 	sa.placeholderResource = nil
@@ -2288,12 +2411,14 @@ func (sa *Application) cleanupTrackedResource() {
 
 // GetApplicationSummary locked version to get the application summary
 // Exposed for test only
+// +checklocksexcludewrite:sa.RWMutex
 func (sa *Application) GetApplicationSummary(rmID string) *ApplicationSummary {
 	sa.RLock()
 	defer sa.RUnlock()
 	return sa.getApplicationSummary(rmID)
 }
 
+// +checklocksread:sa.RWMutex
 func (sa *Application) getApplicationSummary(rmID string) *ApplicationSummary {
 	return &ApplicationSummary{
 		ApplicationID:       sa.ApplicationID,
@@ -2314,6 +2439,7 @@ func (sa *Application) getApplicationSummary(rmID string) *ApplicationSummary {
 // The application summary only contains correct data when the application is in the Completed state.
 // Logging the data in any other state will show incomplete or inconsistent data.
 // After the data is logged the objects are cleaned up to lower overhead of Completed application tracking.
+// +checklocksexclude:sa.RWMutex
 func (sa *Application) LogAppSummary(rmID string) {
 	sa.Lock()
 	defer sa.Unlock()
@@ -2325,6 +2451,7 @@ func (sa *Application) LogAppSummary(rmID string) {
 }
 
 // GetTrackedDAOMap returns the tracked resources type specified in which as a DAO similar to the normal resources.
+// +checklocksexcludewrite:sa.RWMutex
 func (sa *Application) GetTrackedDAOMap(which string) map[string]map[string]int64 {
 	sa.RLock()
 	defer sa.RUnlock()
@@ -2340,6 +2467,7 @@ func (sa *Application) GetTrackedDAOMap(which string) map[string]map[string]int6
 	}
 }
 
+// +checklocksexcludewrite:sa.RWMutex
 func (sa *Application) HasPlaceholderAllocation() bool {
 	sa.RLock()
 	defer sa.RUnlock()
@@ -2352,6 +2480,7 @@ func SetCompletingTimeout(duration time.Duration) {
 }
 
 // SetTimedOutPlaceholder should be used for testing only.
+// +checklocksexclude:sa.RWMutex
 func (sa *Application) SetTimedOutPlaceholder(taskGroupName string, timedOut int64) {
 	sa.Lock()
 	defer sa.Unlock()
@@ -2461,12 +2590,14 @@ func (sa *Application) getResourceFromTags(tag string) *resources.Resource {
 	return resource
 }
 
+// +checklocksexcludewrite:sa.RWMutex
 func (sa *Application) GetSubmissionTime() time.Time {
 	sa.RLock()
 	defer sa.RUnlock()
 	return sa.submissionTime
 }
 
+// +checklocksexcludewrite:sa.RWMutex
 func (sa *Application) GetBackoffDeadline() time.Time {
 	sa.RLock()
 	defer sa.RUnlock()
@@ -2474,6 +2605,7 @@ func (sa *Application) GetBackoffDeadline() time.Time {
 }
 
 // SetBackoffDeadline sets the backoff deadline. Only used for testing.
+// +checklocksexclude:sa.RWMutex
 func (sa *Application) SetBackoffDeadline(deadline time.Time) {
 	sa.Lock()
 	defer sa.Unlock()

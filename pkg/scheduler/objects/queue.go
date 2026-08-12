@@ -1922,7 +1922,10 @@ func (sq *Queue) getOutStandingRequestsInternal(parentHeadroom *resources.Resour
 		// all these requests are qualified to trigger the up scaling.
 		for _, app := range sq.sortApplications(false) {
 			// calculate the users' headroom
-			userHeadroom := ugm.GetUserManager().Headroom(app.queuePath, app.ApplicationID, app.user)
+			// YUNIKORN-XXXX: the queue path of the application is read without the application
+			// lock while walking the sorted application list. The guard cannot be expressed here,
+			// the application is a loop variable. The fix is to use the GetQueuePath() accessor.
+			userHeadroom := ugm.GetUserManager().Headroom(app.queuePath, app.ApplicationID, app.user) // +checklocksignore
 			appTotal := app.getOutstandingRequests(headRoom, userHeadroom, total)
 			outstandingTotal.AddTo(appTotal)
 			headRoom = resources.SubOnlyExisting(headRoom, appTotal)
