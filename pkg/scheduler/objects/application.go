@@ -2317,8 +2317,12 @@ func (sa *Application) executeReservationReleasedCallback(released int) {
 
 // notifyRMAllocationReleased send an allocation release event to the RM to if the event handler is configured
 // and at least one allocation has been released.
-// No locking must be called while holding the lock
-// +checklocksread:sa.RWMutex
+//
+// This needs no lock and carries no annotation: the only application state it reads is set while the
+// application is built and never changed after (rmEventHandler, rmID and Partition), and the
+// released slice belongs to the caller. It does block: the event handler hands the release to the
+// RM proxy and this waits for the reply, which runs a callback into the shim. Callers that hold the
+// application lock over this call keep it for the length of that round trip.
 func (sa *Application) notifyRMAllocationReleased(released []*Allocation, terminationType si.TerminationType, message string) {
 	// only generate event if needed
 	if len(released) == 0 || sa.rmEventHandler == nil {
