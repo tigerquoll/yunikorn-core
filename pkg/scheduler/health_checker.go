@@ -38,9 +38,12 @@ type HealthChecker struct {
 	confWatcherId string
 
 	// mutable values require locking
+	// +checklocks:RWMutex
 	stopChan *chan struct{}
-	period   time.Duration
-	enabled  bool
+	// +checklocks:RWMutex
+	period time.Duration
+	// +checklocks:RWMutex
+	enabled bool
 
 	locking.RWMutex
 }
@@ -54,12 +57,14 @@ func NewHealthChecker(schedulerContext *ClusterContext) *HealthChecker {
 	return checker
 }
 
+// +checklocksexcludewrite:c.RWMutex
 func (c *HealthChecker) GetPeriod() time.Duration {
 	c.RLock()
 	defer c.RUnlock()
 	return c.period
 }
 
+// +checklocksexcludewrite:c.RWMutex
 func (c *HealthChecker) IsEnabled() bool {
 	c.RLock()
 	defer c.RUnlock()
@@ -133,6 +138,7 @@ func (c *HealthChecker) startInternal(runImmediately bool) {
 	}
 }
 
+// +checklocksexclude:c.RWMutex
 func (c *HealthChecker) Stop() {
 	c.Lock()
 	defer c.Unlock()

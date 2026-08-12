@@ -73,6 +73,7 @@ func init() {
 
 // scheduler config context provides thread-safe access for scheduler configurations
 type SchedulerConfigContext struct {
+	// +checklocks:lock
 	configs map[string]*SchedulerConfig
 	lock    *locking.RWMutex
 }

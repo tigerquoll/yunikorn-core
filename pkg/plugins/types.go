@@ -24,8 +24,10 @@ import (
 )
 
 type SchedulerPlugins struct {
+	// +checklocks:RWMutex
 	ResourceManagerCallbackPlugin api.ResourceManagerCallback
-	StateDumpPlugin               api.StateDumpPlugin
+	// +checklocks:RWMutex
+	StateDumpPlugin api.StateDumpPlugin
 
 	locking.RWMutex
 }
