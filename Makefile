@@ -195,15 +195,19 @@ checklocks: $(CHECKLOCKS_BIN)
 		[ -n "$$gofiles" ] || continue; \
 		"$(GO)" vet "-vettool=$(BASE_DIR)$(CHECKLOCKS_BIN)" -inferred=false $$gofiles || exit 1; \
 	done
-# Prove that the analysis still detects anything at all. The canary is a file with a known
-# violation that no build compiles, it is passed explicitly which makes the analysis ignore
+# Prove that the analysis still detects anything at all. The canary is a file with known
+# violations that no build compiles, it is passed explicitly which makes the analysis ignore
 # its build constraint. It is checked together with the locking package as it uses the locks
-# defined there. Both the exit code and the message are checked: a canary that fails to build
-# or is not found would otherwise look exactly like a violation that was caught.
+# defined there. Both the exit code and the messages are checked: a canary that fails to build
+# or is not found would otherwise look exactly like a violation that was caught. Both classes
+# of violation are required, a guarded field used without the lock and a call into a method
+# that must not be called with the lock held, as they are detected independently.
 	@canary="$$("$(GO)" list -f '{{$$dir := .Dir}}{{range .GoFiles}}{{$$dir}}/{{.}} {{end}}' $(REPO)/locking) $(BASE_DIR)$(CHECKLOCKS_CANARY)"; \
 	report=$$("$(GO)" vet "-vettool=$(BASE_DIR)$(CHECKLOCKS_BIN)" -inferred=false $$canary 2>&1); \
 	found=$$?; \
-	if [ $$found -eq 0 ] || ! printf '%s' "$$report" | grep -q "invalid field access"; then \
+	if [ $$found -eq 0 ] || \
+		! printf '%s' "$$report" | grep -q "invalid field access" || \
+		! printf '%s' "$$report" | grep -q "must not hold"; then \
 		echo "checklocks canary failed: analyzer did not detect a known violation"; \
 		printf '%s\n' "$$report"; \
 		exit 1; \

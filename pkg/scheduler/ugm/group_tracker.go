@@ -105,6 +105,7 @@ func (gt *GroupTracker) headroom(hierarchy []string) *resources.Resource {
 }
 
 // GetResourceUsageDAOInfo returns the DAO object used in the REST API for this group tracker
+// +checklocksexcludewrite:gt.RWMutex
 func (gt *GroupTracker) GetResourceUsageDAOInfo() *dao.GroupResourceUsageDAOInfo {
 	gt.RLock()
 	defer gt.RUnlock()
@@ -171,6 +172,7 @@ func (gt *GroupTracker) canRunApp(hierarchy []string, applicationID string) bool
 // GetMaxResources returns a map of the maxResources for all queues registered under this group tracker.
 // The key into the map is the queue path.
 // This should only be used in test
+// +checklocksexcludewrite:gt.RWMutex
 func (gt *GroupTracker) GetMaxResources() map[string]*resources.Resource {
 	gt.RLock()
 	defer gt.RUnlock()
@@ -180,6 +182,7 @@ func (gt *GroupTracker) GetMaxResources() map[string]*resources.Resource {
 // GetMaxApplications returns a map of the maxRunningApps for all queues registered under this group tracker.
 // The key into the map is the queue path.
 // This should only be used in test
+// +checklocksexcludewrite:gt.RWMutex
 func (gt *GroupTracker) GetMaxApplications() map[string]uint64 {
 	gt.RLock()
 	defer gt.RUnlock()
