@@ -138,7 +138,7 @@ type Queue struct {
 
 // newBlankQueue creates a new empty queue objects with all values initialised.
 func newBlankQueue() *Queue {
-	return &Queue{
+	sq := &Queue{
 		children:                 make(map[string]*Queue),
 		childPriorities:          make(map[string]int32),
 		applications:             make(map[string]*Application),
@@ -158,6 +158,8 @@ func newBlankQueue() *Queue {
 		quotaPreemptionStartTime: time.Time{},
 		askBackoffDelay:          configs.DefaultAskBackOffDelay,
 	}
+	sq.SetClass(locking.ClassQueue)
+	return sq
 }
 
 // NewConfiguredQueue creates a new queue from scratch based on the configuration
