@@ -119,18 +119,24 @@ func Init() {
 
 // EventSystemImpl main implementation of the event system which is used for history tracking.
 type EventSystemImpl struct {
-	eventSystemId string
+	eventSystemId string      // set on creation and never changed, no lock needed
 	Store         *EventStore // storing eventChannel, exported for test
-	publisher     *eventPublisher
-	eventBuffer   *eventRingBuffer
-	streaming     *EventStreaming
+	// +checklocks:RWMutex
+	publisher   *eventPublisher
+	eventBuffer *eventRingBuffer // set on creation and never changed, no lock needed
+	streaming   *EventStreaming  // set on creation and never changed, no lock needed
 
+	// +checklocks:RWMutex
 	channel chan *si.EventRecord // channelling input eventChannel
-	stop    chan struct{}        // channel to stop the system
-	stopped atomic.Bool          // whether the service is stopped
+	// +checklocks:RWMutex
+	stop    chan struct{} // channel to stop the system
+	stopped atomic.Bool   // whether the service is stopped
 
-	trackingEnabled    bool
-	requestCapacity    uint64
+	// +checklocks:RWMutex
+	trackingEnabled bool
+	// +checklocks:RWMutex
+	requestCapacity uint64
+	// +checklocks:RWMutex
 	ringBufferCapacity uint64
 
 	locking.RWMutex
@@ -152,6 +158,7 @@ func (ec *EventSystemImpl) GetEventsFromID(id, count uint64) ([]*si.EventRecord,
 }
 
 // IsEventTrackingEnabled whether history tracking is currently enabled or not.
+// +checklocksexcludewrite:ec.RWMutex
 func (ec *EventSystemImpl) IsEventTrackingEnabled() bool {
 	ec.RLock()
 	defer ec.RUnlock()
@@ -159,11 +166,13 @@ func (ec *EventSystemImpl) IsEventTrackingEnabled() bool {
 }
 
 // StartService starts the event processing in the background. See the interface for details.
+// +checklocksexclude:ec.RWMutex
 func (ec *EventSystemImpl) StartService() {
 	ec.StartServiceWithPublisher(true)
 }
 
 // Stop stops the event system, including the shim publisher if it was started.
+// +checklocksexclude:ec.RWMutex
 func (ec *EventSystemImpl) Stop() {
 	ec.Lock()
 	defer ec.Unlock()
@@ -190,6 +199,7 @@ func (ec *EventSystemImpl) GetEventStreams() []EventStreamData {
 }
 
 // AddEvent adds an event record to the event system. See the interface for details.
+// +checklocksexcludewrite:ec.RWMutex
 func (ec *EventSystemImpl) AddEvent(event *si.EventRecord) {
 	if event != nil {
 		event.Message = truncateEventMessage(event.Message)
@@ -217,6 +227,7 @@ func (ec *EventSystemImpl) AddEvent(event *si.EventRecord) {
 
 // StartServiceWithPublisher starts the event processing background routines.
 // Only exported for testing.
+// +checklocksexclude:ec.RWMutex
 func (ec *EventSystemImpl) StartServiceWithPublisher(withPublisher bool) {
 	ec.Lock()
 	defer ec.Unlock()
@@ -228,13 +239,19 @@ func (ec *EventSystemImpl) StartServiceWithPublisher(withPublisher bool) {
 	ec.stop = make(chan struct{})
 	ec.channel = make(chan *si.EventRecord, configs.DefaultEventChannelSize)
 
+	// YUNIKORN-XXXX: the handler reads the two channel fields on every iteration without
+	// holding the lock while Stop() replaces them under the write lock: it closes the event
+	// channel and sets it to nil. That is an unsynchronised read of a field that is written
+	// concurrently, not just a missing annotation. The fix is to capture both channels in
+	// locals here and pass them into the routine as parameters, the way the streaming
+	// routine in CreateEventStream already does, so the routine never touches the fields.
 	go func() {
 		log.Log(log.Events).Info("Starting event system handler")
 		for {
 			select {
-			case <-ec.stop:
+			case <-ec.stop: // +checklocksignore
 				return
-			case event, ok := <-ec.channel:
+			case event, ok := <-ec.channel: // +checklocksignore
 				if !ok {
 					return
 				}
