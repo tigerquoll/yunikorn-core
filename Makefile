@@ -124,7 +124,7 @@ CHECKLOCKS_GO_CURRENT=$(patsubst go%,%,$(shell "$(GO)" env GOVERSION))
 # Fixture holding a known lock violation, see the checklocks target.
 CHECKLOCKS_CANARY=pkg/locking/checklocks_canary.go
 # The messages the canary must produce, one per class of violation it holds.
-CHECKLOCKS_CANARY_MESSAGES := "invalid field access" "must not hold" "guarded read races" "the declared order has" "a wait under a lock"
+CHECKLOCKS_CANARY_MESSAGES := "invalid field access" "must not hold" "already locked" "guarded read races" "the declared order has" "a wait under a lock"
 
 all:
 	$(MAKE) -C $(dir $(BASE_DIR)) build
@@ -187,11 +187,6 @@ CHECKLOCKS_PACKAGES := $(REPO)/...
 # variant of a package so the file list of each package is passed instead. Inferred locks are
 # turned off: those are guesses based on how often a field happens to be used under a lock,
 # they are not the documented intent and they change as unrelated code changes.
-# The file list costs one thing: the analysed package has no module of its own as far as the
-# tool is concerned, so a callee in another package of this repository is not recognised as
-# ours and what it declares about waiting is not carried to the caller. Findings of that shape
-# only show up in a run over the packages, which the annotations state anyway, see convertUGI
-# in pkg/scheduler. Everything else, including all of the ordering checks, is unaffected.
 # The vet tool runs several analyses and every one of them is named on the command line. Naming
 # them is not the same as taking the default: an analysis added by a later version of the tool
 # then has to be adopted deliberately instead of appearing as a wall of findings on an unrelated

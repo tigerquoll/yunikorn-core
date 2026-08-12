@@ -44,9 +44,10 @@ import "strconv"
 // stops reporting, or that is dropped from the command line, takes its own coverage with it
 // and leaves the others green, which is exactly what this file exists to catch.
 //
-//	checklocks    a guarded field accessed without the lock, and a call to a method that
-//	              must not be called with the lock held: the second is the only machine
-//	              check we have on the self deadlock rules
+//	checklocks    a guarded field accessed without the lock, a call to a method that must
+//	              not be called with the lock held, and a lock taken twice on one path: the
+//	              second is the only machine check we have on the self deadlock rules and
+//	              the third only holds while the wrapper types declare themselves locks
 //	lockstringer  a String method reading a guarded field, which races whatever fmt or zap
 //	              was formatting it under
 //	lockorder     an acquisition that takes the classes in the order the declaration
@@ -93,6 +94,31 @@ func (c *canary) reentrantCall(value int) {
 // choose, so the guarded read below races any writer. The analysis must report a guarded read.
 func (c *canary) String() string {
 	return strconv.Itoa(c.value)
+}
+
+// relock takes and releases the lock twice over, which is balanced. It must not be reported.
+func (c *canary) relock(value int) {
+	c.mu.Lock()
+	c.value = value
+	c.mu.Unlock()
+	c.mu.Lock()
+	c.value = value
+	c.mu.Unlock()
+}
+
+// doubleLock is the third violation the canary exists for: taking the same lock twice on one
+// path, which self deadlocks. The analysis must report that the lock is already locked.
+//
+// This one is only reported while the wrapper types in locking.go declare themselves lock
+// primitives. Without that declaration the forwarding methods need a "+checklocksignore"
+// each, and an ignore is read at every call site of the function that carries it, so the
+// whole class disappears for every wrapper lock in the code base with the canary staying
+// green on the strength of the other messages. That is what this fixture is here to catch.
+func (c *canary) doubleLock(value int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.mu.Lock()
+	c.value = value
 }
 
 // canaryOuter and canaryInner carry the two classes of the edge declared at the top of this

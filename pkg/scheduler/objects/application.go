@@ -1204,7 +1204,7 @@ func (sa *Application) tryAllocate(headRoom *resources.Resource, allowPreemption
 				if fullIterator != nil {
 					// YUNIKORN-XXXX: tryPreemption reaches the RM round trip of timeoutStateTimer
 					// above with the write lock held, see the note on that function.
-					if result, ok := sa.tryPreemption(headRoom, preemptionDelay, preemptAttemptsRemaining, request, fullIterator, false); ok {
+					if result, ok := sa.tryPreemption(headRoom, preemptionDelay, preemptAttemptsRemaining, request, fullIterator, false); ok { // +lockblockingignore
 						// preemption occurred, and possibly reservation
 						return result
 					}
@@ -1240,7 +1240,8 @@ func (sa *Application) tryAllocate(headRoom *resources.Resource, allowPreemption
 			if allowPreemption {
 				fullIterator := fullNodeIterator()
 				if fullIterator != nil {
-					if result, ok := sa.tryPreemption(headRoom, preemptionDelay, preemptAttemptsRemaining, request, fullIterator, true); ok {
+					// YUNIKORN-XXXX: same round trip under the write lock as the call above
+					if result, ok := sa.tryPreemption(headRoom, preemptionDelay, preemptAttemptsRemaining, request, fullIterator, true); ok { // +lockblockingignore
 						// preemption occurred, and possibly reservation
 						return result
 					}
@@ -1556,11 +1557,6 @@ func (sa *Application) checkHeadRooms(ask *Allocation, userHeadroom *resources.R
 }
 
 // tryReservedAllocate tries allocating an outstanding reservation
-// The preemption call below reaches the RM round trip of timeoutStateTimer with the write lock
-// held, see tryAllocate. The suppression is on the function because that line already carries a
-// checklocks ignore and the annotations are matched on the start of the comment, so a second one
-// on the same line would never be read.
-// +lockblockingignore
 func (sa *Application) tryReservedAllocate(headRoom *resources.Resource, nodeIterator func() NodeIterator) *AllocationResult {
 	sa.Lock()
 	defer sa.Unlock()
@@ -1607,7 +1603,9 @@ func (sa *Application) tryReservedAllocate(headRoom *resources.Resource, nodeIte
 				preemptor := NewRequiredNodePreemptor(reserve.node, ask, sa)
 				// the preemptor was built from sa above, the application lock is held here but the
 				// analysis cannot tie the field of the new object back to the receiver
-				preemptor.tryPreemption() // +checklocksignore
+				// YUNIKORN-XXXX: the chain also reaches the RM round trip of timeoutStateTimer with
+				// the write lock held, see the note on tryPreemption
+				preemptor.tryPreemption() // +checklocksignore +lockblockingignore
 				continue
 			}
 		}
@@ -1647,10 +1645,9 @@ func (sa *Application) tryReservedAllocate(headRoom *resources.Resource, nodeIte
 // The preemption chain below ends in notifyRMAllocationReleased, so the RM round trip of
 // timeoutStateTimer is taken with the application write lock held here and at the two callers of
 // this function: a sixth site of that finding, which is recorded as having five, because the wait
-// is not in TryPreemption's own body but one call further down. The suppression is on the function
-// rather than on the call because that line already carries a checklocks ignore and the
-// annotations are matched on the start of the comment.
-// +lockblockingignore
+// is not in TryPreemption's own body but one call further down. The suppression sits on the call
+// that reaches it and on each of the two call sites of this function, rather than on the function,
+// which would silence anything added to the body later as well.
 // +checklocks:sa.RWMutex
 func (sa *Application) tryPreemption(headRoom *resources.Resource, preemptionDelay time.Duration, preemptionAttemptsRemaining *int, ask *Allocation, iterator NodeIterator, nodesTried bool) (*AllocationResult, bool) {
 	if *preemptionAttemptsRemaining == 0 {
@@ -1676,7 +1673,8 @@ func (sa *Application) tryPreemption(headRoom *resources.Resource, preemptionDel
 
 	// attempt preemption
 	// same aliasing limit as above: preemptor.application is sa and its lock is held
-	return preemptor.TryPreemption() // +checklocksignore
+	// YUNIKORN-XXXX: this is the call that reaches the RM round trip, see above
+	return preemptor.TryPreemption() // +checklocksignore +lockblockingignore
 }
 
 // tryNodesNoReserve tries all the nodes for a reserved request that have not been tried yet.

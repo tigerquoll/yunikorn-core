@@ -1442,9 +1442,9 @@ func (pc *PartitionContext) convertUGI(ugi *si.UserGroupInformation, forced bool
 	// slow or unreachable directory blocks every writer of the partition for as long as it takes.
 	// The fix is to resolve outside the lock. The declaration that makes this visible is the
 	// "+blocking" on security.GetUserGroup: the resolver is a function valued field, so nothing
-	// else can see where the call ends up. The make target does not report it, it hands the
-	// analyser a file list rather than a package and the declaration does not cross that
-	// boundary, see the note in the Makefile; running the analysis over the packages does.
+	// else can see where the call ends up. The ignore is what keeps the make target green: the
+	// declaration is carried across the package boundary in the file list mode the target runs
+	// in, so removing it reports here.
 	return pc.userGroupCache.ConvertUGI(ugi, forced) // +lockblockingignore
 }
 

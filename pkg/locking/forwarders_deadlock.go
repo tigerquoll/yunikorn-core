@@ -33,27 +33,29 @@ package locking
 // is not tracked at all. With a named field any use of them is a compile error until a
 // forwarder is added here deliberately.
 //
-// The "+checklocksignore" on each forwarder is required because a forwarder acquires (or
-// releases) the inner lock and returns with the lock state changed, which is what the lock
-// balance check flags. The ignore is not free: it also suppresses the per call site
-// "already locked" and "unlock without lock" diagnostics for every wrapper lock in the code
-// base. That class of bug is still caught at runtime by the go-deadlock detection. The rest
-// of the lock state tracking is unaffected: guarded field access, the lock requirements of
-// annotated functions and the return balance of the calling function are all still checked,
+// The forwarders need nothing of their own from the analysis: the wrapper types declare
+// themselves lock primitives (see locking.go), so a call to one is intercepted at the call
+// site exactly as a call to the wrapped lock would be and the body is not analysed, a lock
+// implementation not being a critical section. Until that declaration existed every forwarder
+// carried a "+checklocksignore" instead, to silence the balance error a method that takes a
+// lock and returns holding it produces. Those ignores are gone, and with them the checking
+// they cost: an ignore is read at every call site, not only in the function that carries it,
+// so a single ignore per forwarder suppressed the per call site "already locked" and "unlock
+// without lock" diagnostics for every wrapper lock in the code base. That class is checked
+// again, statically as well as by the go-deadlock detection at runtime. The rest of the lock
+// state tracking never depended on this: guarded field access, the lock requirements of
+// annotated functions and the return balance of the calling function were all still checked,
 // the last of which is what reports an unlock-relock gap.
 //
 // The forwarders shift the go-deadlock reports by one stack frame: the "<<<<<" marker points
 // at the forwarder in this file and the calling code is one frame further down. They are
 // fully inlined so there is no runtime cost.
-
-// +checklocksignore
 //
 // This is the deadlock tagged build used by "make test": the forwarders also drive the lock class
 // order check. The check itself is behind an atomic switch that is only set when
 // DEADLOCK_CLASS_ORDER_ENABLED is on, and the body is a call so these copies do not inline. That
 // is why the default build in forwarders.go carries the plain versions.
 
-// +checklocksignore
 func (m *Mutex) Lock() {
 	if classOrderEnabled.Load() {
 		m.enterClass()
@@ -61,7 +63,6 @@ func (m *Mutex) Lock() {
 	m.mu.Lock()
 }
 
-// +checklocksignore
 func (m *Mutex) Unlock() {
 	if classOrderEnabled.Load() {
 		m.leaveClass()
@@ -69,7 +70,6 @@ func (m *Mutex) Unlock() {
 	m.mu.Unlock()
 }
 
-// +checklocksignore
 func (m *RWMutex) Lock() {
 	if classOrderEnabled.Load() {
 		m.enterClass()
@@ -77,7 +77,6 @@ func (m *RWMutex) Lock() {
 	m.mu.Lock()
 }
 
-// +checklocksignore
 func (m *RWMutex) Unlock() {
 	if classOrderEnabled.Load() {
 		m.leaveClass()
@@ -85,7 +84,6 @@ func (m *RWMutex) Unlock() {
 	m.mu.Unlock()
 }
 
-// +checklocksignore
 func (m *RWMutex) RLock() {
 	if classOrderEnabled.Load() {
 		m.enterClass()
@@ -93,7 +91,6 @@ func (m *RWMutex) RLock() {
 	m.mu.RLock()
 }
 
-// +checklocksignore
 func (m *RWMutex) RUnlock() {
 	if classOrderEnabled.Load() {
 		m.leaveClass()
