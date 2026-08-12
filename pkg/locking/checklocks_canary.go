@@ -31,6 +31,11 @@ package locking
 // The canary deliberately uses the full path that the rest of the code base uses: a wrapper
 // lock from this package, held in a named field, with a field guarded by a "+checklocks:"
 // annotation.
+//
+// Two classes of violation are covered, the make target checks for both messages: a guarded
+// field accessed without the lock and a call to a method that must not be called with the
+// lock held. Losing either one is a real loss of coverage, the second class is the only
+// machine check we have on the self deadlock rules.
 
 type canary struct {
 	// +checklocks:mu
@@ -49,4 +54,21 @@ func (c *canary) lockedWrite(value int) {
 // holding the lock. The analysis must report an invalid field access here.
 func (c *canary) unlockedWrite(value int) {
 	c.value = value
+}
+
+// selfLocking takes the lock itself, so holding it on entry would deadlock.
+// +checklocksexclude:c.mu
+func (c *canary) selfLocking(value int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.value = value
+}
+
+// reentrantCall is the second violation the canary exists for: calling a method that must
+// not be entered with the lock held while holding it. The analysis must report that the lock
+// must not be held here.
+func (c *canary) reentrantCall(value int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.selfLocking(value)
 }

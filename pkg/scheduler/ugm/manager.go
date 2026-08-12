@@ -86,6 +86,7 @@ type LimitConfig struct {
 // IncreaseTrackedResource Increase the resource usage for the given user group and queue path combination.
 // As and when every allocation or asks requests fulfilled on application, corresponding user and group
 // resource usage would be increased against specific application.
+// +checklocksexclude:m.RWMutex
 func (m *Manager) IncreaseTrackedResource(queuePath, applicationID string, usage *resources.Resource, user security.UserGroup) {
 	log.Log(log.SchedUGM).Debug("Increasing resource usage",
 		zap.String("user", user.User),
@@ -135,6 +136,7 @@ func (m *Manager) IncreaseTrackedResource(queuePath, applicationID string, usage
 // As and when every allocation or asks release happens, corresponding user and group
 // resource usage would be decreased against specific application. When the final asks release happens, removeApp should be set to true and
 // application itself would be removed from the tracker and no more usage would be tracked further for that specific application.
+// +checklocksexclude:m.RWMutex
 func (m *Manager) DecreaseTrackedResource(queuePath, applicationID string, usage *resources.Resource, user security.UserGroup, removeApp bool) {
 	log.Log(log.SchedUGM).Debug("Decreasing resource usage",
 		zap.String("user", user.User),
@@ -199,6 +201,7 @@ func (m *Manager) DecreaseTrackedResource(queuePath, applicationID string, usage
 	}
 }
 
+// +checklocksexcludewrite:m.RWMutex
 func (m *Manager) GetUserTrackers() []*UserTracker {
 	m.RLock()
 	defer m.RUnlock()
@@ -210,12 +213,14 @@ func (m *Manager) GetUserTrackers() []*UserTracker {
 }
 
 // GetUserTracker returns the UserTracker object if defined for the user and a nil otherwise.
+// +checklocksexcludewrite:m.RWMutex
 func (m *Manager) GetUserTracker(user string) *UserTracker {
 	m.RLock()
 	defer m.RUnlock()
 	return m.userTrackers[user]
 }
 
+// +checklocksexcludewrite:m.RWMutex
 func (m *Manager) GetGroupTrackers() []*GroupTracker {
 	m.RLock()
 	defer m.RUnlock()
@@ -227,6 +232,7 @@ func (m *Manager) GetGroupTrackers() []*GroupTracker {
 }
 
 // GetGroupTracker returns the GroupTracker object if defined for the group and a nil otherwise.
+// +checklocksexcludewrite:m.RWMutex
 func (m *Manager) GetGroupTracker(group string) *GroupTracker {
 	m.RLock()
 	defer m.RUnlock()
@@ -312,6 +318,7 @@ func (m *Manager) ensureGroupInternal(userGroups []string, queuePath string) str
 	return m.ensureGroupInternal(userGroups, parentPath)
 }
 
+// +checklocksexclude:m.RWMutex
 func (m *Manager) UpdateConfig(config configs.QueueConfig, queuePath string) error {
 	userWildCardLimitsConfig := make(map[string]*LimitConfig)
 	groupWildCardLimitsConfig := make(map[string]*LimitConfig)
@@ -506,7 +513,10 @@ func (m *Manager) clearEarlierSetUserLimits(newUserLimits map[string]map[string]
 // resetUserEarlierUsage Clear or reset earlier usage only when user already tracked for the queue path.
 // Reset the max apps and max resources to default, unlink the end leaf queue of queue path from its immediate parent and
 // eventually remove user tracker object itself from ugm if it can be removed.
+// The user tracker is locked and unlocked repeatedly by the calls below, so its lock must
+// not be held on entry.
 // +checklocks:m.RWMutex
+// +checklocksexclude:ut.RWMutex
 func (m *Manager) resetUserEarlierUsage(ut *UserTracker, queuePath string) {
 	// Is this user already tracked for the queue path?
 	hierarchy := strings.Split(queuePath, configs.DOT)
@@ -557,7 +567,10 @@ func (m *Manager) clearEarlierSetGroupLimits(newGroupLimits map[string]map[strin
 // Decrease the group usage and collect the list of applications for which user app group linkage needs to be broken.
 // Reset the max apps and max resources to default, unlink the end leaf queue of queue path from its immediate parent and
 // eventually remove group tracker object itself from ugm if it can be removed.
+// The group tracker is locked and unlocked repeatedly by the calls below, so its lock must
+// not be held on entry.
 // +checklocks:m.RWMutex
+// +checklocksexclude:gt.RWMutex
 func (m *Manager) resetGroupEarlierUsage(gt *GroupTracker, queuePath string) {
 	hierarchy := strings.Split(queuePath, configs.DOT)
 	if gt.isQueuePathTrackedCompletely(hierarchy) {
@@ -676,6 +689,7 @@ func (m *Manager) getUserWildCardLimitsConfig(queuePath string) *LimitConfig {
 }
 
 // Headroom calculates the headroom for this specific application that runs as the user and group.
+// +checklocksexclude:m.RWMutex
 func (m *Manager) Headroom(queuePath, applicationID string, user security.UserGroup) *resources.Resource {
 	hierarchy := strings.Split(queuePath, configs.DOT)
 	userTracker := m.getUserTracker(user.User)
@@ -698,6 +712,7 @@ func (m *Manager) Headroom(queuePath, applicationID string, user security.UserGr
 }
 
 // CanRunApp checks the maxApplications for this specific application that runs as the user and group.
+// +checklocksexclude:m.RWMutex
 func (m *Manager) CanRunApp(queuePath, applicationID string, user security.UserGroup) bool {
 	hierarchy := strings.Split(queuePath, configs.DOT)
 	userTracker := m.getUserTracker(user.User)
@@ -720,6 +735,7 @@ func (m *Manager) CanRunApp(queuePath, applicationID string, user security.UserG
 }
 
 // ClearUserTrackers only for tests
+// +checklocksexclude:m.RWMutex
 func (m *Manager) ClearUserTrackers() {
 	m.Lock()
 	defer m.Unlock()
@@ -727,6 +743,7 @@ func (m *Manager) ClearUserTrackers() {
 }
 
 // ClearGroupTrackers only for tests
+// +checklocksexclude:m.RWMutex
 func (m *Manager) ClearGroupTrackers() {
 	m.Lock()
 	defer m.Unlock()
@@ -734,6 +751,7 @@ func (m *Manager) ClearGroupTrackers() {
 }
 
 // ClearConfigLimits only for tests
+// +checklocksexclude:m.RWMutex
 func (m *Manager) ClearConfigLimits() {
 	m.Lock()
 	defer m.Unlock()
@@ -746,6 +764,7 @@ func (m *Manager) ClearConfigLimits() {
 
 // GetUserResources returns the root queue maxResources for the user
 // Should only be used in tests
+// +checklocksexcludewrite:m.RWMutex
 func (m *Manager) GetUserResources(user string) *resources.Resource {
 	m.RLock()
 	defer m.RUnlock()
@@ -761,6 +780,7 @@ func (m *Manager) GetUserResources(user string) *resources.Resource {
 
 // GetGroupResources returns the root queue maxResources
 // Should only be used in tests
+// +checklocksexcludewrite:m.RWMutex
 func (m *Manager) GetGroupResources(group string) *resources.Resource {
 	m.RLock()
 	defer m.RUnlock()
