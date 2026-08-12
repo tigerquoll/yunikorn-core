@@ -53,26 +53,43 @@ type Allocation struct {
 	preemptable       bool
 
 	// Mutable fields which need protection
-	allocated            bool
-	allocLog             map[string]*AllocationLogEntry
-	preemptionTriggered  bool
-	preemptCheckTime     time.Time
-	schedulingAttempted  bool // whether scheduler core has tried to schedule this allocation
-	scaleUpTriggered     bool // whether this allocation has triggered autoscaling or not
-	allocatedResource    *resources.Resource
-	askEvents            *schedEvt.AskEvents
+	// +checklocks:RWMutex
+	allocated bool
+	// +checklocks:RWMutex
+	allocLog map[string]*AllocationLogEntry
+	// +checklocks:RWMutex
+	preemptionTriggered bool
+	// +checklocks:RWMutex
+	preemptCheckTime time.Time
+	// +checklocks:RWMutex
+	schedulingAttempted bool // whether scheduler core has tried to schedule this allocation
+	// +checklocks:RWMutex
+	scaleUpTriggered bool // whether this allocation has triggered autoscaling or not
+	// +checklocks:RWMutex
+	allocatedResource *resources.Resource
+	askEvents         *schedEvt.AskEvents
+	// +checklocks:RWMutex
 	userQuotaCheckFailed bool
-	headroomCheckFailed  bool
+	// +checklocks:RWMutex
+	headroomCheckFailed bool
 
 	// Fields used once an allocation is bound
-	nodeID                string      // the node this allocation is bound to
-	bindTime              time.Time   // the time this allocation was bound to a node
-	placeholderUsed       bool        // whether a placeholder was used for this allocation
-	placeholderCreateTime time.Time   // the time the placeholder was created, if any
-	released              bool        // whether this allocation has been released (for placeholders)
-	release               *Allocation // placeholder to be released for this allocation
-	preempted             bool        // whether this allocation has been marked for preemption
-	instType              string      // the instance type of the node at the time this allocation was bound
+	// +checklocks:RWMutex
+	nodeID string // the node this allocation is bound to
+	// +checklocks:RWMutex
+	bindTime time.Time // the time this allocation was bound to a node
+	// +checklocks:RWMutex
+	placeholderUsed bool // whether a placeholder was used for this allocation
+	// +checklocks:RWMutex
+	placeholderCreateTime time.Time // the time the placeholder was created, if any
+	// +checklocks:RWMutex
+	released bool // whether this allocation has been released (for placeholders)
+	// +checklocks:RWMutex
+	release *Allocation // placeholder to be released for this allocation
+	// +checklocks:RWMutex
+	preempted bool // whether this allocation has been marked for preemption
+	// +checklocks:RWMutex
+	instType string // the instance type of the node at the time this allocation was bound
 
 	locking.RWMutex
 }
@@ -203,6 +220,7 @@ func (a *Allocation) GetCreateTime() time.Time {
 }
 
 // GetBindTime returns the time this allocation was bound.
+// +checklocksexcludewrite:a.RWMutex
 func (a *Allocation) GetBindTime() time.Time {
 	a.RLock()
 	defer a.RUnlock()
@@ -210,6 +228,7 @@ func (a *Allocation) GetBindTime() time.Time {
 }
 
 // SetBindTime sets the time this allocation was bound.
+// +checklocksexclude:a.RWMutex
 func (a *Allocation) SetBindTime(bindTime time.Time) {
 	a.Lock()
 	defer a.Unlock()
@@ -217,6 +236,7 @@ func (a *Allocation) SetBindTime(bindTime time.Time) {
 }
 
 // IsPlaceholderUsed returns whether this allocation is replacing a placeholder.
+// +checklocksexcludewrite:a.RWMutex
 func (a *Allocation) IsPlaceholderUsed() bool {
 	a.RLock()
 	defer a.RUnlock()
@@ -224,6 +244,7 @@ func (a *Allocation) IsPlaceholderUsed() bool {
 }
 
 // SetPlaceholderUsed sets whether this allocation is replacing a placeholder.
+// +checklocksexclude:a.RWMutex
 func (a *Allocation) SetPlaceholderUsed(placeholderUsed bool) {
 	a.Lock()
 	defer a.Unlock()
@@ -231,6 +252,7 @@ func (a *Allocation) SetPlaceholderUsed(placeholderUsed bool) {
 }
 
 // GetPlaceholderCreateTime returns the placeholder's create time for this allocation, if applicable.
+// +checklocksexcludewrite:a.RWMutex
 func (a *Allocation) GetPlaceholderCreateTime() time.Time {
 	a.RLock()
 	defer a.RUnlock()
@@ -238,6 +260,7 @@ func (a *Allocation) GetPlaceholderCreateTime() time.Time {
 }
 
 // SetPlaceholderCreateTime updates the placeholder's creation time.
+// +checklocksexclude:a.RWMutex
 func (a *Allocation) SetPlaceholderCreateTime(placeholderCreateTime time.Time) {
 	a.Lock()
 	defer a.Unlock()
@@ -255,6 +278,7 @@ func (a *Allocation) IsOriginator() bool {
 }
 
 // GetNodeID gets the node this allocation is assigned to.
+// +checklocksexcludewrite:a.RWMutex
 func (a *Allocation) GetNodeID() string {
 	a.RLock()
 	defer a.RUnlock()
@@ -262,6 +286,7 @@ func (a *Allocation) GetNodeID() string {
 }
 
 // SetNodeID sets the node this allocation is assigned to.
+// +checklocksexclude:a.RWMutex
 func (a *Allocation) SetNodeID(nodeID string) {
 	a.Lock()
 	defer a.Unlock()
@@ -269,6 +294,7 @@ func (a *Allocation) SetNodeID(nodeID string) {
 }
 
 // SetInstanceType sets node instance type for this allocation.
+// +checklocksexclude:a.RWMutex
 func (a *Allocation) SetInstanceType(instType string) {
 	a.Lock()
 	defer a.Unlock()
@@ -276,6 +302,7 @@ func (a *Allocation) SetInstanceType(instType string) {
 }
 
 // GetInstanceType return the type of the instance used by this allocation.
+// +checklocksexcludewrite:a.RWMutex
 func (a *Allocation) GetInstanceType() string {
 	a.RLock()
 	defer a.RUnlock()
@@ -288,6 +315,7 @@ func (a *Allocation) GetPriority() int32 {
 }
 
 // IsReleased returns the release status of the allocation.
+// +checklocksexcludewrite:a.RWMutex
 func (a *Allocation) IsReleased() bool {
 	a.RLock()
 	defer a.RUnlock()
@@ -295,6 +323,7 @@ func (a *Allocation) IsReleased() bool {
 }
 
 // SetReleased updates the release status of the allocation.
+// +checklocksexclude:a.RWMutex
 func (a *Allocation) SetReleased(released bool) error {
 	a.Lock()
 	defer a.Unlock()
@@ -313,6 +342,7 @@ func (a *Allocation) GetTagsClone() map[string]string {
 }
 
 // GetRelease returns the associated release for this allocation.
+// +checklocksexcludewrite:a.RWMutex
 func (a *Allocation) GetRelease() *Allocation {
 	a.RLock()
 	defer a.RUnlock()
@@ -320,6 +350,7 @@ func (a *Allocation) GetRelease() *Allocation {
 }
 
 // SetRelease sets the release for this allocation.
+// +checklocksexclude:a.RWMutex
 func (a *Allocation) SetRelease(release *Allocation) {
 	a.Lock()
 	defer a.Unlock()
@@ -327,6 +358,7 @@ func (a *Allocation) SetRelease(release *Allocation) {
 }
 
 // ClearRelease removes any release from this allocation.
+// +checklocksexclude:a.RWMutex
 func (a *Allocation) ClearRelease() {
 	a.Lock()
 	defer a.Unlock()
@@ -334,6 +366,7 @@ func (a *Allocation) ClearRelease() {
 }
 
 // HasRelease determines if this allocation has an associated release.
+// +checklocksexcludewrite:a.RWMutex
 func (a *Allocation) HasRelease() bool {
 	a.RLock()
 	defer a.RUnlock()
@@ -341,6 +374,7 @@ func (a *Allocation) HasRelease() bool {
 }
 
 // GetAllocatedResource returns a reference to the allocated resources for this allocation. This must be treated as read-only.
+// +checklocksexcludewrite:a.RWMutex
 func (a *Allocation) GetAllocatedResource() *resources.Resource {
 	a.RLock()
 	defer a.RUnlock()
@@ -348,6 +382,7 @@ func (a *Allocation) GetAllocatedResource() *resources.Resource {
 }
 
 // SetAllocatedResource updates the allocated resources for this allocation.
+// +checklocksexclude:a.RWMutex
 func (a *Allocation) SetAllocatedResource(allocatedResource *resources.Resource) {
 	a.Lock()
 	defer a.Unlock()
@@ -355,6 +390,7 @@ func (a *Allocation) SetAllocatedResource(allocatedResource *resources.Resource)
 }
 
 // MarkPreempted marks the allocation as preempted.
+// +checklocksexclude:a.RWMutex
 func (a *Allocation) MarkPreempted() error {
 	a.Lock()
 	defer a.Unlock()
@@ -366,6 +402,7 @@ func (a *Allocation) MarkPreempted() error {
 }
 
 // MarkUnPreempted unmarks the allocation as preempted.
+// +checklocksexclude:a.RWMutex
 func (a *Allocation) MarkUnPreempted() {
 	a.Lock()
 	defer a.Unlock()
@@ -373,6 +410,7 @@ func (a *Allocation) MarkUnPreempted() {
 }
 
 // IsPreempted returns whether the allocation has been marked for preemption or not.
+// +checklocksexcludewrite:a.RWMutex
 func (a *Allocation) IsPreempted() bool {
 	a.RLock()
 	defer a.RUnlock()
@@ -413,6 +451,7 @@ func (a *Allocation) deallocate() bool {
 }
 
 // IsAllocated determines if this request has been allocated yet.
+// +checklocksexcludewrite:a.RWMutex
 func (a *Allocation) IsAllocated() bool {
 	a.RLock()
 	defer a.RUnlock()
@@ -420,6 +459,7 @@ func (a *Allocation) IsAllocated() bool {
 }
 
 // GetPreemptCheckTime returns the time this allocation was last evaluated for preemption.
+// +checklocksexcludewrite:a.RWMutex
 func (a *Allocation) GetPreemptCheckTime() time.Time {
 	a.RLock()
 	defer a.RUnlock()
@@ -427,6 +467,7 @@ func (a *Allocation) GetPreemptCheckTime() time.Time {
 }
 
 // UpdatePreemptCheckTime is used to mark when this allocation is evaluated for preemption.
+// +checklocksexclude:a.RWMutex
 func (a *Allocation) UpdatePreemptCheckTime() {
 	a.Lock()
 	defer a.Unlock()
@@ -463,6 +504,7 @@ func (a *Allocation) GetTag(tagName string) string {
 }
 
 // LogAllocationFailure keeps track of preconditions not being met for an allocation.
+// +checklocksexclude:a.RWMutex
 func (a *Allocation) LogAllocationFailure(message string, allocate bool) {
 	// for now, don't log reservations
 	if !allocate {
@@ -505,6 +547,7 @@ func (a *Allocation) SendPreemptedByQuotaChangeEvent(queuePath string) {
 }
 
 // GetAllocationLog returns a list of log entries corresponding to allocation preconditions not being met.
+// +checklocksexcludewrite:a.RWMutex
 func (a *Allocation) GetAllocationLog() []*AllocationLogEntry {
 	a.RLock()
 	defer a.RUnlock()
@@ -523,6 +566,7 @@ func (a *Allocation) GetAllocationLog() []*AllocationLogEntry {
 }
 
 // MarkTriggeredPreemption marks the current allocation because it triggered preemption during scheduling.
+// +checklocksexclude:a.RWMutex
 func (a *Allocation) MarkTriggeredPreemption() {
 	a.Lock()
 	defer a.Unlock()
@@ -530,6 +574,7 @@ func (a *Allocation) MarkTriggeredPreemption() {
 }
 
 // HasTriggeredPreemption returns whether this allocation has triggered preemption.
+// +checklocksexcludewrite:a.RWMutex
 func (a *Allocation) HasTriggeredPreemption() bool {
 	a.RLock()
 	defer a.RUnlock()
@@ -546,6 +591,7 @@ func (a *Allocation) LessThan(other *Allocation) bool {
 }
 
 // SetSchedulingAttempted marks whether scheduling has been attempted at least once for this allocation.
+// +checklocksexclude:a.RWMutex
 func (a *Allocation) SetSchedulingAttempted(attempted bool) {
 	a.Lock()
 	defer a.Unlock()
@@ -553,6 +599,7 @@ func (a *Allocation) SetSchedulingAttempted(attempted bool) {
 }
 
 // IsSchedulingAttempted determines whether scheduling has been attempted at least once for this allocation.
+// +checklocksexcludewrite:a.RWMutex
 func (a *Allocation) IsSchedulingAttempted() bool {
 	a.RLock()
 	defer a.RUnlock()
@@ -560,6 +607,7 @@ func (a *Allocation) IsSchedulingAttempted() bool {
 }
 
 // SetScaleUpTriggered marks this allocation as having triggered the autoscaler.
+// +checklocksexclude:a.RWMutex
 func (a *Allocation) SetScaleUpTriggered(triggered bool) {
 	a.Lock()
 	defer a.Unlock()
@@ -567,6 +615,7 @@ func (a *Allocation) SetScaleUpTriggered(triggered bool) {
 }
 
 // HasTriggeredScaleUp determines if this allocation has triggered auto-scaling.
+// +checklocksexcludewrite:a.RWMutex
 func (a *Allocation) HasTriggeredScaleUp() bool {
 	a.RLock()
 	defer a.RUnlock()
