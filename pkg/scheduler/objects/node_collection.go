@@ -70,16 +70,21 @@ type baseNodeCollection struct {
 	Partition string // partition used with this collection
 
 	// Private fields need protection
-	nsp         NodeSortingPolicy      // node sorting policy
-	nodes       map[string]*nodeRef    // nodes assigned to this collection
+	// +checklocks:RWMutex
+	nsp NodeSortingPolicy // node sorting policy
+	// +checklocks:RWMutex
+	nodes map[string]*nodeRef // nodes assigned to this collection
+	// +checklocks:RWMutex
 	sortedNodes *btree.BTreeG[nodeRef] // nodes sorted by score
 
+	// the iterators are created with the collection and never replaced, no lock needed
 	unreservedIterator *treeIterator
 	fullIterator       *treeIterator
 
 	locking.RWMutex
 }
 
+// +checklocksread:nc.RWMutex
 func (nc *baseNodeCollection) scoreNode(node *Node) float64 {
 	if nc.nsp == nil {
 		return 0
@@ -88,6 +93,7 @@ func (nc *baseNodeCollection) scoreNode(node *Node) float64 {
 }
 
 // Add a node to the collection by nodeID.
+// +checklocksexclude:nc.RWMutex
 func (nc *baseNodeCollection) AddNode(node *Node) error {
 	nc.Lock()
 	defer nc.Unlock()
@@ -110,6 +116,7 @@ func (nc *baseNodeCollection) AddNode(node *Node) error {
 }
 
 // Remove a node from the collection by nodeID.
+// +checklocksexclude:nc.RWMutex
 func (nc *baseNodeCollection) RemoveNode(nodeID string) *Node {
 	nc.Lock()
 	defer nc.Unlock()
@@ -130,6 +137,7 @@ func (nc *baseNodeCollection) RemoveNode(nodeID string) *Node {
 }
 
 // Get a node from the collection by nodeID.
+// +checklocksexcludewrite:nc.RWMutex
 func (nc *baseNodeCollection) GetNode(nodeID string) *Node {
 	nc.RLock()
 	defer nc.RUnlock()
@@ -141,6 +149,7 @@ func (nc *baseNodeCollection) GetNode(nodeID string) *Node {
 }
 
 // Get the count of nodes
+// +checklocksexcludewrite:nc.RWMutex
 func (nc *baseNodeCollection) GetNodeCount() int {
 	nc.RLock()
 	defer nc.RUnlock()
@@ -148,6 +157,7 @@ func (nc *baseNodeCollection) GetNodeCount() int {
 }
 
 // Return a list of nodes.
+// +checklocksexcludewrite:nc.RWMutex
 func (nc *baseNodeCollection) GetNodes() []*Node {
 	nc.RLock()
 	defer nc.RUnlock()
@@ -178,6 +188,7 @@ func (nc *baseNodeCollection) cloneSortedNodes() *btree.BTreeG[nodeRef] {
 }
 
 // Sets the node sorting policy.
+// +checklocksexclude:nc.RWMutex
 func (nc *baseNodeCollection) SetNodeSortingPolicy(policy NodeSortingPolicy) {
 	nc.Lock()
 	defer nc.Unlock()
@@ -193,6 +204,7 @@ func (nc *baseNodeCollection) SetNodeSortingPolicy(policy NodeSortingPolicy) {
 }
 
 // Gets the node sorting policy.
+// +checklocksexcludewrite:nc.RWMutex
 func (nc *baseNodeCollection) GetNodeSortingPolicy() NodeSortingPolicy {
 	nc.RLock()
 	defer nc.RUnlock()
@@ -200,6 +212,7 @@ func (nc *baseNodeCollection) GetNodeSortingPolicy() NodeSortingPolicy {
 }
 
 // Callback method triggered when a node is updated.
+// +checklocksexclude:nc.RWMutex
 func (nc *baseNodeCollection) NodeUpdated(node *Node) {
 	nc.Lock()
 	defer nc.Unlock()

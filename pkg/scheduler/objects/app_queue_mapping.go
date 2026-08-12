@@ -22,6 +22,7 @@ import "github.com/apache/yunikorn-core/pkg/locking"
 
 // AppQueueMapping maintains a mapping between application IDs and their corresponding queues.
 type AppQueueMapping struct {
+	// +checklocks:RWMutex
 	byAppID map[string]*Queue
 	locking.RWMutex
 }
@@ -32,18 +33,21 @@ func NewAppQueueMapping() *AppQueueMapping {
 	}
 }
 
+// +checklocksexclude:aqm.RWMutex
 func (aqm *AppQueueMapping) AddAppQueueMapping(appID string, queue *Queue) {
 	aqm.Lock()
 	defer aqm.Unlock()
 	aqm.byAppID[appID] = queue
 }
 
+// +checklocksexcludewrite:aqm.RWMutex
 func (aqm *AppQueueMapping) GetQueueByAppId(appID string) *Queue {
 	aqm.RLock()
 	defer aqm.RUnlock()
 	return aqm.byAppID[appID]
 }
 
+// +checklocksexclude:aqm.RWMutex
 func (aqm *AppQueueMapping) RemoveAppQueueMapping(appID string) {
 	aqm.Lock()
 	defer aqm.Unlock()
