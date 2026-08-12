@@ -15,7 +15,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-.PHONY: lint check_scripts license-check pseudo test test_all bench fsm_graph
+.PHONY: lint checklocks checklocks-toolchain check_scripts license-check pseudo test test_all bench fsm_graph
 .PHONY: build tools clean distclean
 
 # Check if this GO tools version used is at least the version of go specified in
@@ -108,13 +108,30 @@ GOLANGCI_LINT_BIN=$(GOLANGCI_LINT_PATH)/golangci-lint
 GOLANGCI_LINT_ARCHIVEBASE=golangci-lint-$(GOLANGCI_LINT_VERSION)-$(OS)-$(EXEC_ARCH)
 GOLANGCI_LINT_ARCHIVE=$(GOLANGCI_LINT_ARCHIVEBASE).tar.gz
 
+# checklocks
+# The version is pinned in the go.mod of the tools module, gvisor does not publish semantic
+# versions, only date based pseudo versions: update by picking a newer pseudo version from
+# the gvisor master branch and running "go mod tidy" in the tools module.
+CHECKLOCKS_MOD_DIR=scripts/checklocks
+CHECKLOCKS_VERSION=$(shell "$(GO)" list -C "$(CHECKLOCKS_MOD_DIR)" -m -f '{{ .Version }}' gvisor.dev/gvisor)
+# The path is keyed on the go version as well as the checklocks version: the export data of a
+# vet tool must match the toolchain that runs "go vet", so a go upgrade must rebuild the tool.
+CHECKLOCKS_PATH=${TOOLS_DIR}/checklocks-$(CHECKLOCKS_VERSION)-$(shell "$(GO)" env GOVERSION)
+CHECKLOCKS_BIN=$(CHECKLOCKS_PATH)/checklocks
+# The go version the tools module needs against the version that is running, both without the
+# "go" prefix. Read from the go directive so that a gvisor update cannot make these drift.
+CHECKLOCKS_GO_REQUIRED=$(shell "$(GO)" list -C "$(CHECKLOCKS_MOD_DIR)" -m -f '{{ .GoVersion }}')
+CHECKLOCKS_GO_CURRENT=$(patsubst go%,%,$(shell "$(GO)" env GOVERSION))
+# Fixture holding a known lock violation, see the checklocks target.
+CHECKLOCKS_CANARY=pkg/locking/checklocks_canary.go
+
 all:
 	$(MAKE) -C $(dir $(BASE_DIR)) build
 
-test_all: check_scripts license-check lint test
+test_all: check_scripts license-check lint checklocks test
 
 # Install tools
-tools: $(SHELLCHECK_BIN) $(GOLANGCI_LINT_BIN)
+tools: $(SHELLCHECK_BIN) $(GOLANGCI_LINT_BIN) $(CHECKLOCKS_BIN)
 
 # Install shellcheck
 $(SHELLCHECK_BIN):
@@ -130,11 +147,67 @@ $(GOLANGCI_LINT_BIN):
 	@curl -sSfL "https://github.com/golangci/golangci-lint/releases/download/v$(GOLANGCI_LINT_VERSION)/$(GOLANGCI_LINT_ARCHIVE)" \
 		| tar -x -z --strip-components=1 -C "$(GOLANGCI_LINT_PATH)" "$(GOLANGCI_LINT_ARCHIVEBASE)/golangci-lint"
 
+# Install checklocks
+# Built from the tools module in $(CHECKLOCKS_MOD_DIR): gvisor is a tool only dependency and
+# must not end up in the go.mod of the scheduler. Building from a module instead of using
+# "go install pkg@version" pins the whole dependency tree via its go.sum. That module needs a
+# newer go than the scheduler does, so the go directive there is higher than the one in the
+# main go.mod on purpose.
+$(CHECKLOCKS_BIN): | checklocks-toolchain
+	@echo "installing checklocks $(CHECKLOCKS_VERSION)"
+	@mkdir -p "$(CHECKLOCKS_PATH)"
+	@"$(GO)" build -C "$(CHECKLOCKS_MOD_DIR)" -o "$(BASE_DIR)$(CHECKLOCKS_BIN)" gvisor.dev/gvisor/tools/checklocks/cmd/checklocks
+
+# Refuse to build or run the analyser with a go that is older than the tools module needs.
+# A vet tool must be built with the toolchain that runs "go vet" or the export data does not
+# match. Letting the toolchain switch happen would do exactly that: the tool would be built
+# with the newer go while "go vet" keeps running on the older one. An order only prerequisite
+# of the binary, so that the check runs before the build and before every use without making
+# the binary itself out of date.
+checklocks-toolchain:
+	@if [ "$(CHECKLOCKS_GO_CURRENT)" != "$(CHECKLOCKS_GO_REQUIRED)" ] && \
+		[ "$$(printf '%s\n%s\n' "$(CHECKLOCKS_GO_CURRENT)" "$(CHECKLOCKS_GO_REQUIRED)" | sort -V | head -1)" = "$(CHECKLOCKS_GO_CURRENT)" ]; then \
+		echo "checklocks needs go $(CHECKLOCKS_GO_REQUIRED) or later, found go $(CHECKLOCKS_GO_CURRENT)"; \
+		echo "  the analyser must be built with the same toolchain that runs \"go vet\": upgrade go"; \
+		exit 1; \
+	fi
+
 # Run lint against the previous commit for PR and branch build
 # In dev setup look at all changes on top of master
 lint: $(GOLANGCI_LINT_BIN)
 	@echo "running golangci-lint"
 	@"${GOLANGCI_LINT_BIN}" run
+
+# Check the lock annotations of the packages that are annotated. Packages are added to the
+# list one by one as the annotation coverage grows: an unannotated package still triggers
+# lock balance errors which would fail the check. Adding a package can also require
+# annotating the callers of its already annotated exported functions in other packages: the
+# lock requirement of a function is only enforced for callers inside the listed packages.
+CHECKLOCKS_PACKAGES := $(REPO)/locking/... $(REPO)/scheduler/ugm/...
+# Only the non test files of a package are analysed. "go vet" has no option to skip the test
+# variant of a package so the file list of each package is passed instead. Inferred locks are
+# turned off: those are guesses based on how often a field happens to be used under a lock,
+# they are not the documented intent and they change as unrelated code changes.
+checklocks: $(CHECKLOCKS_BIN)
+	@echo "running checklocks"
+	@"$(GO)" list -f '{{if .GoFiles}}{{$$dir := .Dir}}{{range .GoFiles}}{{$$dir}}/{{.}} {{end}}{{end}}' $(CHECKLOCKS_PACKAGES) | \
+	while read -r gofiles; do \
+		[ -n "$$gofiles" ] || continue; \
+		"$(GO)" vet "-vettool=$(BASE_DIR)$(CHECKLOCKS_BIN)" -inferred=false $$gofiles || exit 1; \
+	done
+# Prove that the analysis still detects anything at all. The canary is a file with a known
+# violation that no build compiles, it is passed explicitly which makes the analysis ignore
+# its build constraint. It is checked together with the locking package as it uses the locks
+# defined there. Both the exit code and the message are checked: a canary that fails to build
+# or is not found would otherwise look exactly like a violation that was caught.
+	@canary="$$("$(GO)" list -f '{{$$dir := .Dir}}{{range .GoFiles}}{{$$dir}}/{{.}} {{end}}' $(REPO)/locking) $(BASE_DIR)$(CHECKLOCKS_CANARY)"; \
+	report=$$("$(GO)" vet "-vettool=$(BASE_DIR)$(CHECKLOCKS_BIN)" -inferred=false $$canary 2>&1); \
+	found=$$?; \
+	if [ $$found -eq 0 ] || ! printf '%s' "$$report" | grep -q "invalid field access"; then \
+		echo "checklocks canary failed: analyzer did not detect a known violation"; \
+		printf '%s\n' "$$report"; \
+		exit 1; \
+	fi
 
 # Check scripts
 ALLSCRIPTS := $(shell find . -not \( -path ./"${TOOLS_DIR}" -prune \) -not \( -path ./"${BUILD_DIR}" -prune \) -name '*.sh')

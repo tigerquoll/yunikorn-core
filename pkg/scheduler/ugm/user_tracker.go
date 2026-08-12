@@ -35,9 +35,13 @@ type UserTracker struct {
 	// Group is not fixed for user unlike other systems and would be selected based on queue limit config processing flow and may vary for different applications.
 	// Hence, group tracker object may vary for same user running different applications linked through this map with key as application id
 	// and group tracker object as value.
+	// +checklocks:RWMutex
 	appGroupTrackers map[string]*GroupTracker
-	queueTracker     *QueueTracker // Holds the actual resource usage of queue path where application runs
-	events           *ugmEvents
+	// The queue tracker itself is lock free, it relies on the lock of this tracker, so the
+	// lock has to be held to reach any of the usage it holds.
+	// +checklocks:RWMutex
+	queueTracker *QueueTracker // Holds the actual resource usage of queue path where application runs
+	events       *ugmEvents    // set on creation and never changed, no lock needed
 
 	locking.RWMutex
 }
