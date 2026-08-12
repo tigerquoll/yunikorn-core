@@ -74,6 +74,7 @@ type QueuePreemptionSnapshot struct {
 }
 
 // NewPreemptor creates a new preemptor. The preemptor itself is not thread safe, and assumes the application lock is held.
+// +checklocksread:application.RWMutex
 func NewPreemptor(application *Application, headRoom *resources.Resource, preemptionDelay time.Duration, ask *Allocation, iterator NodeIterator, nodesTried bool) *Preemptor {
 	return &Preemptor{
 		application:     application,
@@ -166,7 +167,9 @@ func (p *Preemptor) initWorkingState() int {
 		isReserved := false
 		if node.IsReserved() && !node.isReservedForAllocation(p.ask.GetAllocationKey()) {
 			askPriority := p.ask.priority
-			released, remaining := p.application.cancelMatchingReservations(node.GetReservations(), func(res *reservation) bool {
+			// application lock is held by the caller of TryPreemption, the analysis does not
+			// follow facts into the iterator closure
+			released, remaining := p.application.cancelMatchingReservations(node.GetReservations(), func(res *reservation) bool { // +checklocksignore
 				if res.alloc.requiredNode != "" || res.alloc.HasTriggeredPreemption() {
 					return false
 				}
@@ -582,6 +585,7 @@ func (p *Preemptor) tryNodes() (string, []*Allocation, bool) {
 	return "", nil, false
 }
 
+// +checklocks:p.application.RWMutex
 func (p *Preemptor) TryPreemption() (*AllocationResult, bool) {
 	// validate that sufficient capacity can be freed
 	if !p.checkPreemptionQueueGuarantees() {

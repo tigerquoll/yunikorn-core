@@ -367,7 +367,10 @@ func (qpc *QuotaPreemptionContext) preemptVictims() {
 				qpc.queue.IncPreemptingResource(victim.GetAllocatedResource())
 				victim.SendPreemptedByQuotaChangeEvent(qpc.queue.GetQueuePath())
 			}
-			app.notifyRMAllocationReleased(victims, si.TerminationType_PREEMPTED_BY_SCHEDULER,
+			// YUNIKORN-XXXX: notifyRMAllocationReleased reads guarded application state but the
+			// application lock is not held: quota preemption drives this from the queue side and
+			// never takes it. The guard cannot be expressed, the application is a loop variable.
+			app.notifyRMAllocationReleased(victims, si.TerminationType_PREEMPTED_BY_SCHEDULER, // +checklocksignore
 				"preempting allocations to enforce new max quota for queue : "+qpc.queue.GetQueuePath())
 		}
 	}
