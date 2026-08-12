@@ -132,12 +132,15 @@ func (c *UserGroupCache) run() {
 }
 
 // cleanUpCache clears expired entries from the cache.
+// The lock and the entries are the ones of the cache this is called on, not of the shared
+// instance: the cleaner routine runs past the point where Stop clears that instance, and a cache
+// that is not the shared one would be updated without holding its own lock.
 func (c *UserGroupCache) cleanUpCache() {
 	oldest := time.Now().Unix() - poscache
 	oldestFailed := time.Now().Unix() - negcache
 	// clean up the cache so we do not grow out of bounds
-	instance.lock.Lock()
-	defer instance.lock.Unlock()
+	c.lock.Lock()
+	defer c.lock.Unlock()
 	// walk over the entries in the map and delete the expired ones, cleanup based on the resolved time.
 	// Negative cached entries will expire quicker
 	for key, val := range c.ugs {
@@ -148,10 +151,11 @@ func (c *UserGroupCache) cleanUpCache() {
 }
 
 // resetCache clears the cached content, test use only
+// Locks the cache this is called on, see cleanUpCache.
 func (c *UserGroupCache) resetCache() {
 	log.Log(log.Security).Debug("UserGroupCache reset")
-	instance.lock.Lock()
-	defer instance.lock.Unlock()
+	c.lock.Lock()
+	defer c.lock.Unlock()
 	c.ugs = make(map[string]*UserGroup)
 }
 
