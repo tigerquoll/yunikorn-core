@@ -54,11 +54,14 @@ func (sp *eventPublisher) start() {
 		log.Log(log.Events).Info("Event publisher already running")
 		return
 	}
-	sp.stopCh = make(chan struct{})
-	go func() {
+	stopCh := make(chan struct{})
+	sp.stopCh = stopCh
+	// the routine is given the channel it stops on, reading it from the field would race with
+	// stop(), which clears it, and with a following start(), which replaces it
+	go func(stopCh <-chan struct{}) {
 		for {
 			select {
-			case <-sp.stopCh:
+			case <-stopCh:
 				log.Log(log.Events).Info("Event publisher exiting")
 				return
 			case <-time.After(sp.pushEventInterval):
@@ -72,7 +75,7 @@ func (sp *eventPublisher) start() {
 				}
 			}
 		}
-	}()
+	}(stopCh)
 }
 
 func (sp *eventPublisher) stop() {
@@ -81,7 +84,9 @@ func (sp *eventPublisher) stop() {
 		return
 	}
 	log.Log(log.Events).Info("Stopping event publisher")
-	sp.stopCh <- struct{}{}
+	// closing rather than sending: the routine can be inside the shim callback handing events
+	// over, and a send would wait for it to come back to its select. The channel is not reused,
+	// start() makes a new one.
 	close(sp.stopCh)
 	sp.stopCh = nil
 }

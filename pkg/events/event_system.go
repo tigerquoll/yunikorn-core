@@ -165,22 +165,34 @@ func (ec *EventSystemImpl) StartService() {
 
 // Stop stops the event system, including the shim publisher if it was started.
 func (ec *EventSystemImpl) Stop() {
-	ec.Lock()
-	defer ec.Unlock()
 	// no need to stop twice
 	if !ec.stopped.CompareAndSwap(false, true) {
 		return
 	}
 	log.Log(log.Events).Info("Stopping event system handler")
 
-	ec.stop <- struct{}{}
+	ec.Lock()
+	stop := ec.stop
+	publisher := ec.publisher
+	ec.stop = nil
+	ec.publisher = nil
+	// closing the event channel stays under the lock: AddEvent sends to it under the read lock,
+	// so closing it anywhere else could close the channel between the check and the send
 	if ec.channel != nil {
 		close(ec.channel)
 		ec.channel = nil
 	}
-	if ec.publisher != nil {
-		ec.publisher.stop()
-		ec.publisher = nil
+	ec.Unlock()
+
+	// the routines are told to stop by closing their channel rather than by sending to it. A send
+	// waits for the routine to come back to its select, which it may not do for a long time or at
+	// all: the publisher blocks in the shim callback while it hands events over. Waiting for that
+	// here used to happen under the write lock, which stops every AddEvent with it.
+	if stop != nil {
+		close(stop)
+	}
+	if publisher != nil {
+		publisher.stop()
 	}
 }
 
@@ -225,16 +237,21 @@ func (ec *EventSystemImpl) StartServiceWithPublisher(withPublisher bool) {
 		return
 	}
 	ec.trackingEnabled = isTrackingEnabled()
-	ec.stop = make(chan struct{})
-	ec.channel = make(chan *si.EventRecord, configs.DefaultEventChannelSize)
+	stop := make(chan struct{})
+	channel := make(chan *si.EventRecord, configs.DefaultEventChannelSize)
+	ec.stop = stop
+	ec.channel = channel
 
-	go func() {
+	// the routine is given the channels it works on: reading them from the fields would race with
+	// Stop, which clears them, and with a following StartServiceWithPublisher, which replaces
+	// them. The same reason the streaming routine takes its channels as arguments.
+	go func(stop <-chan struct{}, channel <-chan *si.EventRecord) {
 		log.Log(log.Events).Info("Starting event system handler")
 		for {
 			select {
-			case <-ec.stop:
+			case <-stop:
 				return
-			case event, ok := <-ec.channel:
+			case event, ok := <-channel:
 				if !ok {
 					return
 				}
@@ -246,7 +263,7 @@ func (ec *EventSystemImpl) StartServiceWithPublisher(withPublisher bool) {
 				}
 			}
 		}
-	}()
+	}(stop, channel)
 	if withPublisher {
 		ec.publisher = createShimPublisher(ec.Store)
 		ec.publisher.start()
