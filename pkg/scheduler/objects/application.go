@@ -188,6 +188,7 @@ func NewApplication(siApp *si.AddApplicationRequest, ugi security.UserGroup, eve
 		runnableByUserLimit:   true,
 		runnableInQueue:       true,
 	}
+	app.SetClass(locking.ClassApplication)
 	placeholderTimeout := common.ConvertSITimeoutWithAdjustment(siApp, defaultPlaceholderTimeout)
 	gangSchedStyle := siApp.GetGangSchedulingStyle()
 	if gangSchedStyle != Soft && gangSchedStyle != Hard {
