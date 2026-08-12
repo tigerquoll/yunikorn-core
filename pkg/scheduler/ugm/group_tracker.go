@@ -36,8 +36,8 @@ type GroupTracker struct {
 	locking.RWMutex
 }
 
-func newGroupTracker(groupName string, events *ugmEvents) *GroupTracker {
-	queueTracker := newRootQueueTracker(group)
+func newGroupTracker(groupName string, events *ugmEvents, wildCardLimits map[string]*LimitConfig) *GroupTracker {
+	queueTracker := newRootQueueTracker(group, wildCardLimits)
 	groupTracker := &GroupTracker{
 		groupName:    groupName,
 		applications: make(map[string]string),
@@ -47,7 +47,7 @@ func newGroupTracker(groupName string, events *ugmEvents) *GroupTracker {
 	return groupTracker
 }
 
-func (gt *GroupTracker) increaseTrackedResource(queuePath, applicationID string, usage *resources.Resource, user string) {
+func (gt *GroupTracker) increaseTrackedResource(queuePath, applicationID string, usage *resources.Resource, user string, wildCardLimits map[string]*LimitConfig) {
 	if gt == nil {
 		return
 	}
@@ -55,7 +55,7 @@ func (gt *GroupTracker) increaseTrackedResource(queuePath, applicationID string,
 	defer gt.Unlock()
 	gt.events.sendIncResourceUsageForGroup(gt.groupName, queuePath, usage)
 	gt.applications[applicationID] = user
-	gt.queueTracker.increaseTrackedResource(strings.Split(queuePath, configs.DOT), applicationID, group, usage)
+	gt.queueTracker.increaseTrackedResource(strings.Split(queuePath, configs.DOT), applicationID, group, usage, wildCardLimits)
 }
 
 func (gt *GroupTracker) decreaseTrackedResource(queuePath, applicationID string, usage *resources.Resource, removeApp bool) bool {
@@ -77,27 +77,27 @@ func (gt *GroupTracker) getTrackedApplications() map[string]string {
 	return gt.applications
 }
 
-func (gt *GroupTracker) setLimits(queuePath string, resource *resources.Resource, maxApps uint64) {
+func (gt *GroupTracker) setLimits(queuePath string, resource *resources.Resource, maxApps uint64, wildCardLimits map[string]*LimitConfig) {
 	gt.Lock()
 	defer gt.Unlock()
 	gt.events.sendLimitSetForGroup(gt.groupName, queuePath)
-	gt.queueTracker.setLimit(strings.Split(queuePath, configs.DOT), resource, maxApps, false, group, false)
+	gt.queueTracker.setLimit(strings.Split(queuePath, configs.DOT), resource, maxApps, false, group, false, wildCardLimits)
 }
 
-func (gt *GroupTracker) clearLimits(queuePath string) {
+func (gt *GroupTracker) clearLimits(queuePath string, wildCardLimits map[string]*LimitConfig) {
 	gt.Lock()
 	defer gt.Unlock()
 	gt.events.sendLimitRemoveForGroup(gt.groupName, queuePath)
-	gt.queueTracker.setLimit(strings.Split(queuePath, configs.DOT), nil, 0, false, group, false)
+	gt.queueTracker.setLimit(strings.Split(queuePath, configs.DOT), nil, 0, false, group, false, wildCardLimits)
 }
 
 // headroom calculate the resource headroom for the group in the hierarchy defined
 // Note: headroom of queue tracker is not read-only.
 // It traverses the queue hierarchy and creates a childQueueTracker if it does not exist.
-func (gt *GroupTracker) headroom(hierarchy []string) *resources.Resource {
+func (gt *GroupTracker) headroom(hierarchy []string, wildCardLimits map[string]*LimitConfig) *resources.Resource {
 	gt.Lock()
 	defer gt.Unlock()
-	return gt.queueTracker.headroom(hierarchy, group)
+	return gt.queueTracker.headroom(hierarchy, group, wildCardLimits)
 }
 
 // GetResourceUsageDAOInfo returns the DAO object used in the REST API for this group tracker
@@ -158,10 +158,10 @@ func (gt *GroupTracker) decreaseAllTrackedResourceUsage(hierarchy []string) map[
 // canRunApp checks if the group is allowed to run the application in the queue defined in hierarchy.
 // Note: canRunApp of queue tracker is not read-only,
 // It traverses the queue hierarchy and creates a childQueueTracker if it does not exist.
-func (gt *GroupTracker) canRunApp(hierarchy []string, applicationID string) bool {
+func (gt *GroupTracker) canRunApp(hierarchy []string, applicationID string, wildCardLimits map[string]*LimitConfig) bool {
 	gt.Lock()
 	defer gt.Unlock()
-	return gt.queueTracker.canRunApp(hierarchy, applicationID, group)
+	return gt.queueTracker.canRunApp(hierarchy, applicationID, group, wildCardLimits)
 }
 
 // GetMaxResources returns a map of the maxResources for all queues registered under this group tracker.
