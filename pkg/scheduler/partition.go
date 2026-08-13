@@ -45,29 +45,39 @@ import (
 	"github.com/apache/yunikorn-scheduler-interface/lib/go/si"
 )
 
+// +lockclass:PartitionContext
+// +checklocksguardedby:RWMutex
 type PartitionContext struct {
+	// +checklocksunguarded
 	RmID string // the RM the partition belongs to
+	// +checklocksunguarded
 	Name string // name of the partition
 
-	// Private fields need protection
-	root                   *objects.Queue                  // start of the queue hierarchy
-	applications           map[string]*objects.Application // applications assigned to this partition
-	completedApplications  map[string]*objects.Application // completed applications from this partition
-	rejectedApplications   map[string]*objects.Application // rejected applications from this partition
-	nodes                  objects.NodeCollection          // nodes assigned to this partition
-	placementManager       *placement.AppPlacementManager  // placement manager for this partition
-	partitionManager       *partitionManager               // manager for this partition
-	stateMachine           *fsm.FSM                        // the state of the partition for scheduling
-	stateTime              time.Time                       // last time the state was updated (needed for cleanup)
-	userGroupCache         *security.UserGroupCache        // user cache per partition
-	totalPartitionResource *resources.Resource             // Total node resources
-	allocations            int                             // Number of allocations on the partition
-	reservations           int                             // number of reservations
-	placeholderAllocations int                             // number of placeholder allocations
-	preemptionEnabled      bool                            // whether preemption is enabled or not
-	quotaPreemptionEnabled bool                            // whether quota preemption is enabled or not
-	foreignAllocs          map[string]*objects.Allocation  // foreign (non-Yunikorn) allocations
-	appQueueMapping        *objects.AppQueueMapping        // appID mapping to queues
+	// +checklocksunguarded
+	root                  *objects.Queue                  // start of the queue hierarchy
+	applications          map[string]*objects.Application // applications assigned to this partition
+	completedApplications map[string]*objects.Application // completed applications from this partition
+	rejectedApplications  map[string]*objects.Application // rejected applications from this partition
+	// +checklocksunguarded
+	nodes objects.NodeCollection // nodes assigned to this partition
+	// +checklocksunguarded
+	placementManager *placement.AppPlacementManager // placement manager for this partition
+	// +checklocksunguarded
+	partitionManager *partitionManager // manager for this partition
+	// +checklocksunguarded
+	stateMachine *fsm.FSM  // the state of the partition for scheduling
+	stateTime    time.Time // last time the state was updated (needed for cleanup)
+	// +checklocksunguarded
+	userGroupCache         *security.UserGroupCache       // user cache per partition
+	totalPartitionResource *resources.Resource            // Total node resources
+	allocations            int                            // Number of allocations on the partition
+	reservations           int                            // number of reservations
+	placeholderAllocations int                            // number of placeholder allocations
+	preemptionEnabled      bool                           // whether preemption is enabled or not
+	quotaPreemptionEnabled bool                           // whether quota preemption is enabled or not
+	foreignAllocs          map[string]*objects.Allocation // foreign (non-Yunikorn) allocations
+	// +checklocksunguarded
+	appQueueMapping *objects.AppQueueMapping // appID mapping to queues
 
 	// The partition write lock must not be held while manipulating an application.
 	// Scheduling is running continuously as a lock free background task. Scheduling an application
@@ -146,7 +156,8 @@ func (pc *PartitionContext) initialPartitionFromConfig(conf configs.PartitionCon
 	// get the user group cache for the partition
 	pc.userGroupCache = security.GetUserGroupCache(conf.UserGroupResolver, security.GetConfigReader(), security.GetLdapAccess())
 	pc.updateNodeSortingPolicy(conf, silence)
-	pc.updatePreemption(conf)
+	// the partition is still being built and cannot be reached yet, so no lock is taken
+	pc.updatePreemption(conf) // +checklocksignore
 
 	// update limit settings: start at the root
 	if !silence {
@@ -157,6 +168,9 @@ func (pc *PartitionContext) initialPartitionFromConfig(conf configs.PartitionCon
 
 // NOTE: this is a lock free call. It should only be called holding the PartitionContext lock.
 // If the silence flag is set to true, the function will not log when setting the node sorting policy.
+// YUNIKORN-XXXX: the banner above is stale. This only updates the node collection, which has its
+// own lock, and updatePartitionDetails deliberately calls it without the partition lock to keep
+// the partition and placement manager lock order. No partition lock requirement is annotated.
 func (pc *PartitionContext) updateNodeSortingPolicy(conf configs.PartitionConfig, silence bool) {
 	var configuredPolicy policies.SortingPolicy
 	configuredPolicy, err := policies.SortingPolicyFromString(conf.NodeSortPolicy.Type)
@@ -172,6 +186,7 @@ func (pc *PartitionContext) updateNodeSortingPolicy(conf configs.PartitionConfig
 }
 
 // NOTE: this is a lock free call. It should only be called holding the PartitionContext lock.
+// +checklocks:pc.RWMutex
 func (pc *PartitionContext) updatePreemption(conf configs.PartitionConfig) {
 	pc.preemptionEnabled = conf.Preemption.Enabled == nil || *conf.Preemption.Enabled
 	pc.quotaPreemptionEnabled = conf.Preemption.QuotaPreemptionEnabled != nil && *conf.Preemption.QuotaPreemptionEnabled
@@ -233,6 +248,7 @@ func (pc *PartitionContext) addQueue(conf []configs.QueueConfig, parent *objects
 // Update the passed in queues and then do this recursively for the children
 //
 // NOTE: this is a lock free call. It should only be called holding the PartitionContext lock.
+// +checklocks:pc.RWMutex
 func (pc *PartitionContext) updateQueues(config []configs.QueueConfig, parent *objects.Queue) error {
 	// get the name of the passed in queue
 	parentPath := parent.QueuePath + configs.DOT
@@ -300,7 +316,10 @@ func (pc *PartitionContext) isStopped() bool {
 func (pc *PartitionContext) handlePartitionEvent(event objects.ObjectEvent) error {
 	err := pc.stateMachine.Event(context.Background(), event.String(), pc.Name)
 	if err == nil {
-		pc.stateTime = time.Now()
+		// YUNIKORN-XXXX: the state machine has its own lock but stateTime is partition state and
+		// is written here without the partition lock. markPartitionForRemoval, the only caller,
+		// does not hold it either. The fix is to take the partition lock around this write.
+		pc.stateTime = time.Now() // +checklocksignore
 		return nil
 	}
 	// handle the same state transition not nil error (limit of fsm).
@@ -500,6 +519,9 @@ func (pc *PartitionContext) GetQueue(name string) *objects.Queue {
 // Returns nil if the queue is not found otherwise the queue object.
 //
 // NOTE: this is a lock free call. It should only be called holding the PartitionContext lock.
+// YUNIKORN-XXXX: the banner above is stale. The only partition field touched is the root queue,
+// which is set while the partition is built and never replaced, and the walk down the hierarchy
+// uses the queue locks. No partition lock requirement is annotated.
 func (pc *PartitionContext) getQueueInternal(name string) *objects.Queue {
 	// start at the root
 	queue := pc.root
@@ -697,6 +719,8 @@ func (pc *PartitionContext) removeNode(nodeID string) ([]*objects.Allocation, []
 // of the node object as updating the applications and queues is the only goal. Applications and queues are not accessible
 // from the node. The removed and confirmed allocations are returned.
 // NOTE: this is a lock free call. It must NOT be called holding the PartitionContext lock.
+// The body only reads the lock, so the derivation would exclude a writer alone: keep the wider rule.
+// +checklocksexclude:pc.RWMutex
 func (pc *PartitionContext) removeNodeAllocations(node *objects.Node) ([]*objects.Allocation, []*objects.Allocation) {
 	released := make([]*objects.Allocation, 0)
 	confirmed := make([]*objects.Allocation, 0)
@@ -884,6 +908,8 @@ func (pc *PartitionContext) tryPlaceholderAllocate() *objects.AllocationResult {
 
 // Process the allocation and make the left over changes in the partition.
 // NOTE: this is a lock free call. It must NOT be called holding the PartitionContext lock.
+// The body only reads the lock, so the derivation would exclude a writer alone: keep the wider rule.
+// +checklocksexclude:pc.RWMutex
 func (pc *PartitionContext) allocate(result *objects.AllocationResult) *objects.AllocationResult {
 	// find the app make sure it still exists
 	appID := result.Request.GetApplicationID()
@@ -1126,17 +1152,20 @@ func (pc *PartitionContext) getAppsState(appMap map[string]*objects.Application,
 // getAppsByState returns a slice of applicationIDs for the current applications filtered by state
 // Completed and Rejected applications are tracked in a separate map and will never be included.
 func (pc *PartitionContext) getAppsByState(state string) []string {
-	return pc.getAppsState(pc.applications, state)
+	// YUNIKORN-XXXX: the tracking map is read without the partition lock while other paths add to
+	// and delete from it under the write lock. Applies to the two sibling helpers below as well.
+	// cleanupExpiredApps then locks per application, so the walk itself stays unprotected.
+	return pc.getAppsState(pc.applications, state) // +checklocksignore
 }
 
 // getRejectedAppsByState returns a slice of applicationIDs for the rejected applications filtered by state.
 func (pc *PartitionContext) getRejectedAppsByState(state string) []string {
-	return pc.getAppsState(pc.rejectedApplications, state)
+	return pc.getAppsState(pc.rejectedApplications, state) // +checklocksignore
 }
 
 // getCompletedAppsByState returns a slice of applicationIDs for the completed applicationIDs filtered by state.
 func (pc *PartitionContext) getCompletedAppsByState(state string) []string {
-	return pc.getAppsState(pc.completedApplications, state)
+	return pc.getAppsState(pc.completedApplications, state) // +checklocksignore
 }
 
 // cleanupExpiredApps cleans up applications in the Expired state from the three tracking maps
@@ -1393,7 +1422,15 @@ func (pc *PartitionContext) handleForeignAllocation(allocationKey, applicationID
 func (pc *PartitionContext) convertUGI(ugi *si.UserGroupInformation, forced bool) (security.UserGroup, error) {
 	pc.RLock()
 	defer pc.RUnlock()
-	return pc.userGroupCache.ConvertUGI(ugi, forced)
+	// YUNIKORN-XXXX: resolving a user that is not cached ends in the name service switch and from
+	// there in whatever directory it is configured against, with the partition read lock held. A
+	// slow or unreachable directory blocks every writer of the partition for as long as it takes.
+	// The fix is to resolve outside the lock. The declaration that makes this visible is the
+	// "+blocking" on security.GetUserGroup: the resolver is a function valued field, so nothing
+	// else can see where the call ends up. The ignore is what keeps the make target green: the
+	// declaration is carried across the package boundary in the file list mode the target runs
+	// in, so removing it reports here.
+	return pc.userGroupCache.ConvertUGI(ugi, forced) // +lockblockingignore
 }
 
 // getOrStoreForeignAlloc returns whether the allocation already exists or stores it if it's new
@@ -1424,6 +1461,8 @@ func (pc *PartitionContext) getOrStoreForeignAlloc(alloc *objects.Allocation) bo
 // if slice[9] = 3, this means there are 3 nodes resource usage is in the range 80% to 90%.
 //
 // NOTE: this is a lock free call. It must NOT be called holding the PartitionContext lock.
+// The body takes no lock of its own, so there is nothing for the derivation to work from.
+// +checklocksexclude:pc.RWMutex
 func (pc *PartitionContext) calculateNodesResourceUsage() map[string][]int {
 	nodesCopy := pc.GetNodes()
 	mapResult := make(map[string][]int)
@@ -1763,10 +1802,13 @@ func (pc *PartitionContext) AddRejectedApplication(rejectedApplication *objects.
 			zap.String("currentState", rejectedApplication.CurrentState()),
 			zap.Error(err))
 	}
-	if pc.rejectedApplications == nil {
-		pc.rejectedApplications = make(map[string]*objects.Application)
+	// YUNIKORN-XXXX: the rejected application map is created and written without the partition
+	// lock. The callers in the cluster context do not hold it either, so two rejections arriving
+	// together race on the map. The fix is to take the partition write lock around this block.
+	if pc.rejectedApplications == nil { // +checklocksignore
+		pc.rejectedApplications = make(map[string]*objects.Application) // +checklocksignore
 	}
-	pc.rejectedApplications[rejectedApplication.ApplicationID] = rejectedApplication
+	pc.rejectedApplications[rejectedApplication.ApplicationID] = rejectedApplication // +checklocksignore
 }
 
 func (pc *PartitionContext) incPhAllocationCount() {

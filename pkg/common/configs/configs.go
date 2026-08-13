@@ -53,13 +53,26 @@ const (
 
 var ConfigContext *SchedulerConfigContext
 
-var configMap map[string]string
-var configMapCallbacks map[string]func()
-var configMapLock locking.RWMutex
+// The declarations below are grouped so that the annotations are attached to the variable they
+// belong to. A comment above a single "var" attaches to the declaration rather than to the
+// variable, and the analysis reads it from the variable, so the annotation would be dropped
+// without a word of warning.
+//
+// The guard is unexported, so these annotations are enforced for the code in this package only:
+// other packages cannot resolve the guard and the analysis skips them there.
+var (
+	// +checklocks:configMapLock
+	configMap map[string]string
+	// +checklocks:configMapLock
+	configMapCallbacks map[string]func()
+
+	configMapLock locking.RWMutex
+)
 
 func init() {
-	configMap = make(map[string]string)
-	configMapCallbacks = make(map[string]func())
+	// package initialisation, nothing can reach the maps yet so no lock is taken
+	configMap = make(map[string]string)          // +checklocksignore
+	configMapCallbacks = make(map[string]func()) // +checklocksignore
 	ConfigContext = &SchedulerConfigContext{
 		configs: make(map[string]*SchedulerConfig),
 		lock:    &locking.RWMutex{},
@@ -73,6 +86,7 @@ func init() {
 
 // scheduler config context provides thread-safe access for scheduler configurations
 type SchedulerConfigContext struct {
+	// +checklocks:lock
 	configs map[string]*SchedulerConfig
 	lock    *locking.RWMutex
 }
@@ -90,6 +104,7 @@ func (ctx *SchedulerConfigContext) Get(policyGroup string) *SchedulerConfig {
 }
 
 // AddConfigMapCallback registers a callback to detect configuration updates
+// +checklocksexclude:configMapLock
 func AddConfigMapCallback(id string, callback func()) {
 	configMapLock.Lock()
 	defer configMapLock.Unlock()
@@ -97,6 +112,7 @@ func AddConfigMapCallback(id string, callback func()) {
 }
 
 // RemoveConfigMapCallback removes a previously registered configuration update callback
+// +checklocksexclude:configMapLock
 func RemoveConfigMapCallback(id string) {
 	configMapLock.Lock()
 	defer configMapLock.Unlock()
@@ -104,6 +120,7 @@ func RemoveConfigMapCallback(id string) {
 }
 
 // Gets the ConfigMap
+// +checklocksexcludewrite:configMapLock
 func GetConfigMap() map[string]string {
 	configMapLock.RLock()
 	defer configMapLock.RUnlock()
@@ -111,6 +128,7 @@ func GetConfigMap() map[string]string {
 }
 
 // Sets the ConfigMap based on configuration refresh
+// +checklocksexclude:configMapLock
 func SetConfigMap(newConfigMap map[string]string) {
 	defer processConfigMapCallbacks()
 
@@ -129,6 +147,7 @@ func processConfigMapCallbacks() {
 	}
 }
 
+// +checklocksexcludewrite:configMapLock
 func getConfigMapCallbacks() []func() {
 	configMapLock.RLock()
 	defer configMapLock.RUnlock()

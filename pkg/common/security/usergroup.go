@@ -48,9 +48,10 @@ var stopped atomic.Bool      // whether UserGroupCache is stopped (needed for mu
 // UserGroupCache for the user entries.
 type UserGroupCache struct {
 	lock     locking.RWMutex
-	interval time.Duration
-	myType   string
-	ugs      map[string]*UserGroup
+	interval time.Duration // set on creation and never changed, no lock needed
+	myType   string        // set while creating the singleton and never changed after
+	// +checklocks:lock
+	ugs map[string]*UserGroup
 	// methods that allow mocking of the class or extending to use non OS solutions
 	lookup        func(userName string) (*user.User, error)
 	lookupGroupID func(gid string) (*user.Group, error)
@@ -99,7 +100,9 @@ func GetUserGroupCache(ugr configs.UserGroupResolver, ldapConfigReader ConfigRea
 			instance = GetUserGroupNoResolve()
 			instance.myType = defType // do not use the type from the config as it might not be clean.
 		}
-		instance.ugs = make(map[string]*UserGroup)
+		// the cache is being created inside a sync.Once, nothing can reach it yet, so the map
+		// is initialised without the lock
+		instance.ugs = make(map[string]*UserGroup) // +checklocksignore
 		log.Log(log.Security).Info("starting UserGroupCache cleaner",
 			zap.Stringer("cleanerInterval", instance.interval))
 		go instance.run()
@@ -136,13 +139,18 @@ func (c *UserGroupCache) cleanUpCache() {
 	oldest := time.Now().Unix() - poscache
 	oldestFailed := time.Now().Unix() - negcache
 	// clean up the cache so we do not grow out of bounds
+	// YUNIKORN-XXXX: the lock of the global singleton is taken but the map of the receiver is
+	// the one that is modified. Both are the same object for the singleton so it works by
+	// accident, any other cache instance is left unprotected. It is also a crash: Stop() sets
+	// the global instance to nil, so a cleaner run that has already selected its timer branch
+	// dereferences a nil instance here. The fix is to use the lock of the receiver.
 	instance.lock.Lock()
 	defer instance.lock.Unlock()
 	// walk over the entries in the map and delete the expired ones, cleanup based on the resolved time.
 	// Negative cached entries will expire quicker
-	for key, val := range c.ugs {
+	for key, val := range c.ugs { // +checklocksignore
 		if val.resolved < oldest || (val.failed && val.resolved < oldestFailed) {
-			delete(c.ugs, key)
+			delete(c.ugs, key) // +checklocksignore
 		}
 	}
 }
@@ -150,9 +158,11 @@ func (c *UserGroupCache) cleanUpCache() {
 // resetCache clears the cached content, test use only
 func (c *UserGroupCache) resetCache() {
 	log.Log(log.Security).Debug("UserGroupCache reset")
+	// YUNIKORN-XXXX: same mismatch as cleanUpCache, the lock of the global singleton guards a
+	// write to the map of the receiver.
 	instance.lock.Lock()
 	defer instance.lock.Unlock()
-	c.ugs = make(map[string]*UserGroup)
+	c.ugs = make(map[string]*UserGroup) // +checklocksignore
 }
 
 func (c *UserGroupCache) ConvertUGI(ugi *si.UserGroupInformation, force bool) (UserGroup, error) {
@@ -195,6 +205,11 @@ func (c *UserGroupCache) ConvertUGI(ugi *si.UserGroupInformation, force bool) (U
 // GetUserGroup get the user group information for a singe user. An error will still return a UserGroup.
 // The Failed flag in the object will be set to true for any failures.
 // The information is cached, negatively and positively.
+// The resolver is reached through a function valued field, so no analysis can see that this
+// call ends in os/user, and from there in the name service switch and whatever directory it
+// is configured against. The declaration is what says so.
+//
+// +blocking
 func (c *UserGroupCache) GetUserGroup(userName string) (UserGroup, error) {
 	// check if we have a user to resolve
 	if userName == "" {

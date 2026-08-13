@@ -81,52 +81,65 @@ type StateLogEntry struct {
 	ApplicationState string
 }
 
+// +lockclass:Application
+// +checklocksguardedby:RWMutex
 type Application struct {
-	ApplicationID string            // application ID
-	Partition     string            // partition Name
-	tags          map[string]string // application tags used in scheduling
+	// +checklocksunguarded
+	ApplicationID string // application ID
+	// +checklocksunguarded
+	Partition string // partition Name
+	// +checklocksunguarded
+	tags map[string]string // application tags used in scheduling
 
-	// Private mutable fields need protection
-	queuePath         string
-	queue             *Queue                  // queue the application is running in
-	pending           *resources.Resource     // pending resources from asks for the app
-	reservations      map[string]*reservation // a map of reservations
-	requests          map[string]*Allocation  // a map of allocations, pending or satisfied
-	sortedRequests    sortedRequests          // list of requests pre-sorted
-	user              security.UserGroup      // owner of the application
-	allocatedResource *resources.Resource     // total allocated resources
-	submissionTime    time.Time               // time application was submitted (based on the first ask)
+	queuePath      string
+	queue          *Queue                  // queue the application is running in
+	pending        *resources.Resource     // pending resources from asks for the app
+	reservations   map[string]*reservation // a map of reservations
+	requests       map[string]*Allocation  // a map of allocations, pending or satisfied
+	sortedRequests sortedRequests          // list of requests pre-sorted
+	// +checklocksunguarded
+	user              security.UserGroup  // owner of the application
+	allocatedResource *resources.Resource // total allocated resources
+	submissionTime    time.Time           // time application was submitted (based on the first ask)
 
 	usedResource        *resources.TrackedResource // keep track of resource usage of the application
 	preemptedResource   *resources.TrackedResource // keep track of preempted resource usage of the application
 	placeholderResource *resources.TrackedResource // keep track of placeholder resource usage of the application
 
-	maxAllocatedResource *resources.Resource         // max allocated resources
-	allocatedPlaceholder *resources.Resource         // total allocated placeholder resources
-	allocations          map[string]*Allocation      // list of all satisfied allocations
-	placeholderAsk       *resources.Resource         // total placeholder request for the app (all task groups)
-	stateMachine         *fsm.FSM                    // application state machine
-	stateTimer           *time.Timer                 // timer for state time
-	execTimeout          time.Duration               // execTimeout for the application run
-	placeholderTimer     *time.Timer                 // placeholder replace timer
-	gangSchedulingStyle  string                      // gang scheduling style can be hard (after timeout we fail the application), or soft (after timeeout we schedule it as a normal application)
-	startTime            time.Time                   // the time that the application starts running. Default is zero.
-	finishedTime         time.Time                   // the time of finishing this application. the default value is zero time
-	rejectedMessage      string                      // If the application is rejected, save the rejected message
-	stateLog             []*StateLogEntry            // state log for this application
-	placeholderData      map[string]*PlaceholderData // track placeholder and gang related info
-	askMaxPriority       int32                       // highest priority value of outstanding asks
-	hasPlaceholderAlloc  bool                        // Whether there is at least one allocated placeholder
-	runnableInQueue      bool                        // whether the application is runnable/schedulable in the queue. Default is true.
-	runnableByUserLimit  bool                        // whether the application is runnable/schedulable based on user/group quota. Default is true.
-	backoffDeadline      time.Time                   // no scheduling from this application until this deadline
+	maxAllocatedResource *resources.Resource    // max allocated resources
+	allocatedPlaceholder *resources.Resource    // total allocated placeholder resources
+	allocations          map[string]*Allocation // list of all satisfied allocations
+	// +checklocksunguarded
+	placeholderAsk *resources.Resource // total placeholder request for the app (all task groups)
+	// +checklocksunguarded
+	stateMachine *fsm.FSM    // application state machine
+	stateTimer   *time.Timer // timer for state time
+	// +checklocksunguarded
+	execTimeout      time.Duration // execTimeout for the application run
+	placeholderTimer *time.Timer   // placeholder replace timer
+	// +checklocksunguarded
+	gangSchedulingStyle string                      // gang scheduling style can be hard (after timeout we fail the application), or soft (after timeeout we schedule it as a normal application)
+	startTime           time.Time                   // the time that the application starts running. Default is zero.
+	finishedTime        time.Time                   // the time of finishing this application. the default value is zero time
+	rejectedMessage     string                      // If the application is rejected, save the rejected message
+	stateLog            []*StateLogEntry            // state log for this application
+	placeholderData     map[string]*PlaceholderData // track placeholder and gang related info
+	askMaxPriority      int32                       // highest priority value of outstanding asks
+	hasPlaceholderAlloc bool                        // Whether there is at least one allocated placeholder
+	runnableInQueue     bool                        // whether the application is runnable/schedulable in the queue. Default is true.
+	runnableByUserLimit bool                        // whether the application is runnable/schedulable based on user/group quota. Default is true.
+	backoffDeadline     time.Time                   // no scheduling from this application until this deadline
 
-	rmEventHandler              handler.EventHandler
+	// +checklocksunguarded
+	rmEventHandler handler.EventHandler
+	// +checklocksunguarded
 	rmID                        string
 	terminatedCallback          func(appID string)
 	reservationReleasedCallback func(released int)
-	appEvents                   *schedEvt.ApplicationEvents
-	sendStateChangeEvents       bool // whether to send state-change events or not (simplifies testing)
+	// +checklocksunguarded
+	appEvents *schedEvt.ApplicationEvents
+	// +checklocksunguarded
+	sendStateChangeEvents bool // whether to send state-change events or not (simplifies testing)
 
 	locking.RWMutex
 }
@@ -177,6 +190,10 @@ func NewApplication(siApp *si.AddApplicationRequest, ugi security.UserGroup, eve
 	return app
 }
 
+// YUNIKORN-XXXX: GetSubmissionTime takes the application read lock, so formatting an application
+// from code that holds the write lock deadlocks on it, see TrackedResource.String. The submission
+// time is set at construction and could be read directly, which is the fix.
+// +lockstringerignore
 func (sa *Application) String() string {
 	if sa == nil {
 		return "application is nil"
@@ -189,6 +206,7 @@ func (sa *Application) SetState(state string) {
 	sa.stateMachine.SetState(state)
 }
 
+// +checklocks:sa.RWMutex
 func (sa *Application) recordState(appState string) {
 	// lock not acquired here as it is already held during HandleApplicationEvent() / OnStateChange()
 	sa.stateLog = append(sa.stateLog, &StateLogEntry{
@@ -282,6 +300,7 @@ func (sa *Application) HandleApplicationEventWithInfo(event applicationEvent, ev
 // OnStatChange every time the application enters a new state.
 // It sends an event about the state change to the shim as an application update.
 // The only state that does not generate an event is Rejected.
+// +checklocks:sa.RWMutex
 func (sa *Application) OnStateChange(event *fsm.Event, eventInfo string) {
 	sa.recordState(event.Dst)
 	if event.Dst == Rejected.String() || sa.rmEventHandler == nil {
@@ -310,6 +329,7 @@ func (sa *Application) OnStateChange(event *fsm.Event, eventInfo string) {
 // Set the state timer to make sure the application will not get stuck in a time-sensitive state too long.
 // This prevents an app from not progressing to the next state if a timeout is required.
 // Used for placeholder timeout and completion handling.
+// +checklocks:sa.RWMutex
 func (sa *Application) setStateTimer(timeout time.Duration, currentState string, event applicationEvent) {
 	log.Log(log.SchedApplication).Debug("Application state timer initiated",
 		zap.String("appID", sa.ApplicationID),
@@ -356,7 +376,12 @@ func (sa *Application) timeoutStateTimer(expectedState string, event application
 					zap.Int("replaced", replacing),
 					zap.Int("preempted", preempted),
 					zap.Int("releasing", len(toRelease)))
-				sa.notifyRMAllocationReleased(toRelease, si.TerminationType_TIMEOUT, "releasing placeholders on app complete")
+				// YUNIKORN-XXXX: notifyRMAllocationReleased hands the release to the RM and then
+				// waits on an unbuffered channel for the answer, and the application write lock is
+				// held across that round trip here and at the four sites below. An RM that never
+				// answers holds the application for ever: nothing can schedule, complete or query
+				// it. The fix is to notify after unlocking.
+				sa.notifyRMAllocationReleased(toRelease, si.TerminationType_TIMEOUT, "releasing placeholders on app complete") // +lockblockingignore
 				sa.clearStateTimer()
 			} else {
 				// nolint: errcheck
@@ -368,6 +393,7 @@ func (sa *Application) timeoutStateTimer(expectedState string, event application
 
 // Clear the state timer. If the application has progressed out of a time-sensitive state we need to stop the timer and
 // clean up. Called when transitioning from Completed to Completing or when expiring an application.
+// +checklocks:sa.RWMutex
 func (sa *Application) clearStateTimer() {
 	if sa == nil || sa.stateTimer == nil {
 		return
@@ -379,6 +405,7 @@ func (sa *Application) clearStateTimer() {
 		zap.String("state", sa.stateMachine.Current()))
 }
 
+// +checklocks:sa.RWMutex
 func (sa *Application) initPlaceholderTimer() {
 	if sa.placeholderTimer != nil || !sa.IsAccepted() || sa.execTimeout <= 0 {
 		return
@@ -389,6 +416,7 @@ func (sa *Application) initPlaceholderTimer() {
 	sa.placeholderTimer = time.AfterFunc(sa.execTimeout, sa.timeoutPlaceholderProcessing)
 }
 
+// +checklocks:sa.RWMutex
 func (sa *Application) clearPlaceholderTimer() {
 	if sa == nil || sa.placeholderTimer == nil {
 		return
@@ -435,7 +463,8 @@ func (sa *Application) timeoutPlaceholderProcessing() {
 			zap.Int("preempted", preempted),
 			zap.Int("releasing", len(toRelease)))
 		// trigger the release of the placeholders: accounting updates when the release is done
-		sa.notifyRMAllocationReleased(toRelease, si.TerminationType_TIMEOUT, "releasing allocated placeholders on placeholder timeout")
+		// the RM round trip under the write lock, see timeoutStateTimer above
+		sa.notifyRMAllocationReleased(toRelease, si.TerminationType_TIMEOUT, "releasing allocated placeholders on placeholder timeout") // +lockblockingignore
 	} else {
 		// Case 2: in every other case progress the application, and notify the context about the expired placeholders
 		// change the status of the app based on gang style: soft resume normal allocations, hard fail the app
@@ -487,9 +516,10 @@ func (sa *Application) timeoutPlaceholderProcessing() {
 		released := sa.removeAsksInternal("", si.EventRecord_REQUEST_TIMEOUT)
 		sa.executeReservationReleasedCallback(released)
 		// trigger the release of the allocated placeholders: accounting updates when the release is done
-		sa.notifyRMAllocationReleased(toRelease, si.TerminationType_TIMEOUT, "releasing allocated placeholders on placeholder timeout")
+		// the RM round trip under the write lock, see timeoutStateTimer above
+		sa.notifyRMAllocationReleased(toRelease, si.TerminationType_TIMEOUT, "releasing allocated placeholders on placeholder timeout") // +lockblockingignore
 		// trigger the release of the pending placeholders: accounting has been done
-		sa.notifyRMAllocationReleased(pendingRelease, si.TerminationType_TIMEOUT, "releasing pending placeholders on placeholder timeout")
+		sa.notifyRMAllocationReleased(pendingRelease, si.TerminationType_TIMEOUT, "releasing pending placeholders on placeholder timeout") // +lockblockingignore
 	}
 	sa.clearPlaceholderTimer()
 }
@@ -573,6 +603,7 @@ func (sa *Application) RemoveAllocationAsk(allocKey string) int {
 }
 
 // unlocked version of the allocation ask removal
+// +checklocks:sa.RWMutex
 func (sa *Application) removeAsksInternal(allocKey string, detail si.EventRecord_ChangeDetail) int {
 	// shortcut no need to do anything
 	if len(sa.requests) == 0 {
@@ -778,6 +809,7 @@ func (sa *Application) RecoverAllocationAsk(alloc *Allocation) {
 	}
 }
 
+// +checklocks:sa.RWMutex
 func (sa *Application) addAllocationAskInternal(ask *Allocation) {
 	sa.requests[ask.GetAllocationKey()] = ask
 
@@ -853,6 +885,7 @@ func (sa *Application) RollbackAllocation(allocKey string) (*resources.Resource,
 	return res, nil
 }
 
+// +checklocks:sa.RWMutex
 func (sa *Application) allocateAsk(ask *Allocation) (*resources.Resource, error) {
 	if !ask.allocate() {
 		return nil, fmt.Errorf("unable to allocate previously allocated ask %s on app %s", ask.GetAllocationKey(), sa.ApplicationID)
@@ -872,6 +905,7 @@ func (sa *Application) allocateAsk(ask *Allocation) (*resources.Resource, error)
 	return delta, nil
 }
 
+// +checklocks:sa.RWMutex
 func (sa *Application) deallocateAsk(ask *Allocation) (*resources.Resource, error) {
 	if !ask.deallocate() {
 		return nil, fmt.Errorf("unable to deallocate pending ask %s on app %s", ask.GetAllocationKey(), sa.ApplicationID)
@@ -924,6 +958,7 @@ func (sa *Application) Reserve(node *Node, ask *Allocation) error {
 
 // reserveInternal is the unlocked version for Reserve that really does the work.
 // Must only be called while holding the application lock.
+// +checklocks:sa.RWMutex
 func (sa *Application) reserveInternal(node *Node, ask *Allocation) error {
 	allocKey := ask.GetAllocationKey()
 	if sa.requests[allocKey] == nil {
@@ -989,6 +1024,7 @@ func (sa *Application) UnReserve(node *Node, ask *Allocation) int {
 // Unlocked version for UnReserve that really does the work.
 // This is idempotent and will not fail
 // Must only be called while holding the application lock.
+// +checklocks:sa.RWMutex
 func (sa *Application) unReserveInternal(reserve *reservation) int {
 	// this should not happen
 	if reserve == nil {
@@ -1023,6 +1059,7 @@ func (sa *Application) unReserveInternal(reserve *reservation) int {
 
 // canAllocationReserve Check if the allocation has already been reserved. An alloc can never reserve more than one node.
 // No locking must be called while holding the lock
+// +checklocksread:sa.RWMutex
 func (sa *Application) canAllocationReserve(alloc *Allocation) error {
 	allocKey := alloc.GetAllocationKey()
 	if alloc.IsAllocated() {
@@ -1068,6 +1105,7 @@ func (sa *Application) getOutstandingRequests(headRoom *resources.Resource, user
 
 // canReplace returns true if there is a placeholder for the task group available for the request.
 // False for all other cases. Placeholder replacements are handled separately from normal allocations.
+// +checklocksread:sa.RWMutex
 func (sa *Application) canReplace(request *Allocation) bool {
 	// a placeholder or a request without task group can never replace a placeholder
 	if request == nil || request.IsPlaceholder() || request.GetTaskGroup() == "" {
@@ -1127,7 +1165,9 @@ func (sa *Application) tryAllocate(headRoom *resources.Resource, allowPreemption
 			if allowPreemption {
 				fullIterator := fullNodeIterator()
 				if fullIterator != nil {
-					if result, ok := sa.tryPreemption(headRoom, preemptionDelay, preemptAttemptsRemaining, request, fullIterator, false); ok {
+					// YUNIKORN-XXXX: tryPreemption reaches the RM round trip of timeoutStateTimer
+					// above with the write lock held, see the note on that function.
+					if result, ok := sa.tryPreemption(headRoom, preemptionDelay, preemptAttemptsRemaining, request, fullIterator, false); ok { // +lockblockingignore
 						// preemption occurred, and possibly reservation
 						return result
 					}
@@ -1163,7 +1203,8 @@ func (sa *Application) tryAllocate(headRoom *resources.Resource, allowPreemption
 			if allowPreemption {
 				fullIterator := fullNodeIterator()
 				if fullIterator != nil {
-					if result, ok := sa.tryPreemption(headRoom, preemptionDelay, preemptAttemptsRemaining, request, fullIterator, true); ok {
+					// YUNIKORN-XXXX: same round trip under the write lock as the call above
+					if result, ok := sa.tryPreemption(headRoom, preemptionDelay, preemptAttemptsRemaining, request, fullIterator, true); ok { // +lockblockingignore
 						// preemption occurred, and possibly reservation
 						return result
 					}
@@ -1180,6 +1221,7 @@ func (sa *Application) tryAllocate(headRoom *resources.Resource, allowPreemption
 // tryRequiredNode tries to place the allocation in the specific node that is set as the required node in the allocation.
 // The first time the allocation is seen it will try to make the allocation on the node. If that does not work it will
 // always trigger the reservation of the node.
+// +checklocks:sa.RWMutex
 func (sa *Application) tryRequiredNode(request *Allocation, getNodeFn func(string) *Node) *AllocationResult {
 	requiredNode := request.GetRequiredNode()
 	allocationKey := request.GetAllocationKey()
@@ -1231,6 +1273,7 @@ func (sa *Application) tryRequiredNode(request *Allocation, getNodeFn func(strin
 
 // unreserveForApp handles the lock-aware unreserve for a single reservation.
 // Uses the internal unlocked path when the reservation belongs to this app.
+// +checklocks:sa.RWMutex
 func (sa *Application) unreserveForApp(res *reservation) int {
 	var num int
 	if sa.ApplicationID == res.appID {
@@ -1252,6 +1295,7 @@ func (sa *Application) unreserveForApp(res *reservation) int {
 
 // cancelMatchingReservations cancels reservations that match the predicate.
 // Returns the number of reservations released and the number remaining.
+// +checklocks:sa.RWMutex
 func (sa *Application) cancelMatchingReservations(reservations []*reservation, shouldCancel func(*reservation) bool) (released, remaining int) {
 	remaining = len(reservations)
 	for _, res := range reservations {
@@ -1268,6 +1312,7 @@ func (sa *Application) cancelMatchingReservations(reservations []*reservation, s
 // cancelReservations will cancel all non required node reservations for a node. The list of reservations passed in is
 // a copy of all reservations of a single node. This is called during the required node allocation cycle only.
 // The returned int value is used to update the partition counter of active reservations.
+// +checklocks:sa.RWMutex
 func (sa *Application) cancelReservations(reservations []*reservation) int {
 	released, _ := sa.cancelMatchingReservations(reservations, func(res *reservation) bool {
 		return res.alloc.requiredNode == ""
@@ -1321,7 +1366,8 @@ func (sa *Application) tryPlaceholderAllocate(nodeIterator func() NodeIterator, 
 						zap.String("applicationID", sa.ApplicationID),
 						zap.String("allocationKey", ph.GetAllocationKey()))
 				} else {
-					sa.notifyRMAllocationReleased([]*Allocation{ph}, si.TerminationType_TIMEOUT, "cancel placeholder: resource incompatible")
+					// the RM round trip under the write lock, see timeoutStateTimer above
+					sa.notifyRMAllocationReleased([]*Allocation{ph}, si.TerminationType_TIMEOUT, "cancel placeholder: resource incompatible") // +lockblockingignore
 					sa.appEvents.SendPlaceholderLargerEvent(ph.taskGroupName, sa.ApplicationID, ph.allocationKey, request.GetAllocatedResource(), ph.GetAllocatedResource())
 				}
 				continue
@@ -1407,7 +1453,9 @@ func (sa *Application) tryPlaceholderAllocate(nodeIterator func() NodeIterator, 
 					zap.Stringer("placeholder", phFit))
 				return false
 			}
-			_, err := sa.allocateAsk(reqFit)
+			// the closure runs inside the ForEachNode / iterator callback of the enclosing locked
+			// method: the lock is held but the analysis does not follow facts into a closure
+			_, err := sa.allocateAsk(reqFit) // +checklocksignore
 			if err != nil {
 				log.Log(log.SchedApplication).Warn("allocation of ask failed unexpectedly",
 					zap.Error(err))
@@ -1437,7 +1485,8 @@ func (sa *Application) tryPlaceholderAllocate(nodeIterator func() NodeIterator, 
 				}
 
 				// revert: allocate ask
-				_, err = sa.deallocateAsk(reqFit)
+				// lock held by the enclosing method, facts do not reach the closure
+				_, err = sa.deallocateAsk(reqFit) // +checklocksignore
 				if err != nil {
 					log.Log(log.SchedApplication).Warn("deallocation of ask failed unexpectedly",
 						zap.Error(err))
@@ -1515,7 +1564,11 @@ func (sa *Application) tryReservedAllocate(headRoom *resources.Resource, nodeIte
 			if !reserve.node.CanAllocate(ask.GetAllocatedResource()) && !ask.HasTriggeredPreemption() {
 				// try preemption and see if we can free up resource
 				preemptor := NewRequiredNodePreemptor(reserve.node, ask, sa)
-				preemptor.tryPreemption()
+				// the preemptor was built from sa above, the application lock is held here but the
+				// analysis cannot tie the field of the new object back to the receiver
+				// YUNIKORN-XXXX: the chain also reaches the RM round trip of timeoutStateTimer with
+				// the write lock held, see the note on tryPreemption
+				preemptor.tryPreemption() // +checklocksignore +lockblockingignore
 				continue
 			}
 		}
@@ -1552,6 +1605,13 @@ func (sa *Application) tryReservedAllocate(headRoom *resources.Resource, nodeIte
 	return nil
 }
 
+// The preemption chain below ends in notifyRMAllocationReleased, so the RM round trip of
+// timeoutStateTimer is taken with the application write lock held here and at the two callers of
+// this function: a sixth site of that finding, which is recorded as having five, because the wait
+// is not in TryPreemption's own body but one call further down. The suppression sits on the call
+// that reaches it and on each of the two call sites of this function, rather than on the function,
+// which would silence anything added to the body later as well.
+// +checklocks:sa.RWMutex
 func (sa *Application) tryPreemption(headRoom *resources.Resource, preemptionDelay time.Duration, preemptionAttemptsRemaining *int, ask *Allocation, iterator NodeIterator, nodesTried bool) (*AllocationResult, bool) {
 	if *preemptionAttemptsRemaining == 0 {
 		log.Log(log.SchedApplication).Debug("Max queue preemption attempts exhausted",
@@ -1574,7 +1634,9 @@ func (sa *Application) tryPreemption(headRoom *resources.Resource, preemptionDel
 
 	// attempt preemption
 	preemptor := NewPreemptor(sa, headRoom, preemptionDelay, ask, iterator, nodesTried)
-	return preemptor.TryPreemption()
+	// same aliasing limit as above: preemptor.application is sa and its lock is held
+	// YUNIKORN-XXXX: this is the call that reaches the RM round trip, see above
+	return preemptor.TryPreemption() // +checklocksignore +lockblockingignore
 }
 
 // tryNodesNoReserve tries all the nodes for a reserved request that have not been tried yet.
@@ -1593,7 +1655,9 @@ func (sa *Application) tryNodesNoReserve(ask *Allocation, iterator NodeIterator,
 			return true
 		}
 		// we don't care about predicate error messages here
-		result, _ := sa.tryNode(node, ask) //nolint:errcheck
+		// lock held by the enclosing method, facts do not reach the closure
+		//nolint:errcheck
+		result, _ := sa.tryNode(node, ask) // +checklocksignore
 		// allocation worked: update resultType and return
 		if result != nil {
 			result.ResultType = AllocatedReserved
@@ -1610,6 +1674,7 @@ func (sa *Application) tryNodesNoReserve(ask *Allocation, iterator NodeIterator,
 
 // Try all the nodes for a request. The resultType is an allocation or reservation of a node.
 // New allocations can only be reserved after a delay.
+// +checklocksread:sa.RWMutex
 func (sa *Application) tryNodes(ask *Allocation, iterator NodeIterator) *AllocationResult {
 	var nodeToReserve *Node
 	scoreReserved := math.Inf(1)
@@ -1632,7 +1697,8 @@ func (sa *Application) tryNodes(ask *Allocation, iterator NodeIterator) *Allocat
 			return true
 		}
 		tryNodeStart := time.Now()
-		result, err := sa.tryNode(node, ask)
+		// lock held by the enclosing method, facts do not reach the closure
+		result, err := sa.tryNode(node, ask) // +checklocksignore
 		if err != nil {
 			if predicateErrors == nil {
 				predicateErrors = make(map[string]int)
@@ -1713,6 +1779,7 @@ func (sa *Application) tryNodes(ask *Allocation, iterator NodeIterator) *Allocat
 }
 
 // tryNode tries allocating on one specific node
+// +checklocks:sa.RWMutex
 func (sa *Application) tryNode(node *Node, ask *Allocation) (*AllocationResult, error) {
 	toAllocate := ask.GetAllocatedResource()
 	allocationKey := ask.GetAllocationKey()
@@ -1782,8 +1849,13 @@ func (sa *Application) SetQueue(queue *Queue) {
 
 // remove the leaf queue the application runs in, used when completing the app
 func (sa *Application) UnSetQueue() {
-	if sa.queue != nil {
-		sa.queue.RemoveApplication(sa)
+	// YUNIKORN-XXXX: the guarded queue field is read and used before the application lock is
+	// taken. The lock deliberately cannot be held over RemoveApplication, that would nest the
+	// queue lock inside the application lock and invert the documented order, but the field
+	// read itself is unsynchronised against a concurrent SetQueue. The fix is to snapshot the
+	// queue through GetQueue() first and act on the snapshot.
+	if sa.queue != nil { // +checklocksignore
+		sa.queue.RemoveApplication(sa) // +checklocksignore
 	}
 	sa.Lock()
 	defer sa.Unlock()
@@ -1817,6 +1889,7 @@ func (sa *Application) GetAllAllocations() []*Allocation {
 
 // get a copy of all placeholder allocations of the application
 // No locking must be called while holding the lock
+// +checklocksread:sa.RWMutex
 func (sa *Application) getPlaceholderAllocations() []*Allocation {
 	var allocations []*Allocation
 	if sa == nil || len(sa.allocations) == 0 {
@@ -1837,6 +1910,7 @@ func (sa *Application) GetAllRequests() []*Allocation {
 	return sa.getAllRequestsInternal()
 }
 
+// +checklocksread:sa.RWMutex
 func (sa *Application) getAllRequestsInternal() []*Allocation {
 	var requests []*Allocation
 	for _, req := range sa.requests {
@@ -1854,6 +1928,7 @@ func (sa *Application) AddAllocation(alloc *Allocation) {
 
 // Add the Allocation to the application
 // No locking must be called while holding the lock
+// +checklocks:sa.RWMutex
 func (sa *Application) addAllocationInternal(allocType AllocationResultType, alloc *Allocation) {
 	// placeholder allocations do not progress the state of the app and are tracked in a separate total
 	if alloc.IsPlaceholder() {
@@ -1906,17 +1981,20 @@ func (sa *Application) addAllocationInternal(allocType AllocationResultType, all
 
 // Increase user resource usage
 // No locking must be called while holding the lock
+// +checklocksread:sa.RWMutex
 func (sa *Application) incUserResourceUsage(resource *resources.Resource) {
 	ugm.GetUserManager().IncreaseTrackedResource(sa.queuePath, sa.ApplicationID, resource, sa.user)
 }
 
 // Decrease user resource usage
 // No locking must be called while holding the lock
+// +checklocksread:sa.RWMutex
 func (sa *Application) decUserResourceUsage(resource *resources.Resource, removeApp bool) {
 	ugm.GetUserManager().DecreaseTrackedResource(sa.queuePath, sa.ApplicationID, resource, sa.user, removeApp)
 }
 
 // Track used and preempted resources
+// +checklocksread:sa.RWMutex
 func (sa *Application) trackCompletedResource(info *Allocation) {
 	switch {
 	case info.IsPreempted():
@@ -1930,6 +2008,7 @@ func (sa *Application) trackCompletedResource(info *Allocation) {
 
 // When the resource allocated with this allocation is to be removed,
 // have the usedResource to aggregate the resource used by this allocation
+// +checklocksread:sa.RWMutex
 func (sa *Application) updateUsedResource(info *Allocation) {
 	sa.usedResource.AggregateTrackedResource(info.GetInstanceType(),
 		info.GetAllocatedResource(), info.GetBindTime())
@@ -1937,6 +2016,7 @@ func (sa *Application) updateUsedResource(info *Allocation) {
 
 // When the placeholder allocated with this allocation is to be removed,
 // have the placeholderResource to aggregate the resource used by this allocation
+// +checklocksread:sa.RWMutex
 func (sa *Application) updatePlaceholderResource(info *Allocation) {
 	sa.placeholderResource.AggregateTrackedResource(info.GetInstanceType(),
 		info.GetAllocatedResource(), info.GetBindTime())
@@ -1944,6 +2024,7 @@ func (sa *Application) updatePlaceholderResource(info *Allocation) {
 
 // When the resource allocated with this allocation is to be preempted,
 // have the preemptedResource to aggregate the resource used by this allocation
+// +checklocksread:sa.RWMutex
 func (sa *Application) updatePreemptedResource(info *Allocation) {
 	sa.preemptedResource.AggregateTrackedResource(info.GetInstanceType(),
 		info.GetAllocatedResource(), info.GetBindTime())
@@ -1992,6 +2073,7 @@ func (sa *Application) RemoveAllocation(allocationKey string, releaseType si.Ter
 // removeAllocationInternal removes the Allocation from the application.
 // Returns the allocation that was removed or nil if not found.
 // No locking must be called while holding the application lock.
+// +checklocks:sa.RWMutex
 func (sa *Application) removeAllocationInternal(allocationKey string, releaseType si.TerminationType) *Allocation {
 	alloc := sa.allocations[allocationKey]
 
@@ -2070,6 +2152,7 @@ func (sa *Application) removeAllocationInternal(allocationKey string, releaseTyp
 	return alloc
 }
 
+// +checklocks:sa.RWMutex
 func (sa *Application) updateAskMaxPriority() {
 	value := configs.MinPriority
 	for _, v := range sa.requests {
@@ -2082,6 +2165,7 @@ func (sa *Application) updateAskMaxPriority() {
 	sa.queue.UpdateApplicationPriority(sa.ApplicationID, value)
 }
 
+// +checklocksread:sa.RWMutex
 func (sa *Application) hasZeroAllocations() bool {
 	return resources.IsZero(sa.pending) && resources.IsZero(sa.allocatedResource)
 }
@@ -2180,6 +2264,7 @@ func (sa *Application) SetTerminatedCallback(callback func(appID string)) {
 	sa.terminatedCallback = callback
 }
 
+// +checklocksread:sa.RWMutex
 func (sa *Application) executeTerminatedCallback() {
 	if sa.terminatedCallback != nil {
 		go sa.terminatedCallback(sa.ApplicationID)
@@ -2192,6 +2277,7 @@ func (sa *Application) SetReservationReleasedCallback(callback func(released int
 	sa.reservationReleasedCallback = callback
 }
 
+// +checklocksread:sa.RWMutex
 func (sa *Application) executeReservationReleasedCallback(released int) {
 	if released > 0 && sa.reservationReleasedCallback != nil {
 		go sa.reservationReleasedCallback(released)
@@ -2200,7 +2286,12 @@ func (sa *Application) executeReservationReleasedCallback(released int) {
 
 // notifyRMAllocationReleased send an allocation release event to the RM to if the event handler is configured
 // and at least one allocation has been released.
-// No locking must be called while holding the lock
+//
+// This needs no lock and carries no annotation: the only application state it reads is set while the
+// application is built and never changed after (rmEventHandler, rmID and Partition), and the
+// released slice belongs to the caller. It does block: the event handler hands the release to the
+// RM proxy and this waits for the reply, which runs a callback into the shim. Callers that hold the
+// application lock over this call keep it for the length of that round trip.
 func (sa *Application) notifyRMAllocationReleased(released []*Allocation, terminationType si.TerminationType, message string) {
 	// only generate event if needed
 	if len(released) == 0 || sa.rmEventHandler == nil {
@@ -2244,6 +2335,7 @@ func (sa *Application) GetRejectedMessage() string {
 	return sa.rejectedMessage
 }
 
+// +checklocks:sa.RWMutex
 func (sa *Application) addPlaceholderData(ask *Allocation) {
 	if sa.placeholderData == nil {
 		sa.placeholderData = make(map[string]*PlaceholderData)
@@ -2274,11 +2366,13 @@ func (sa *Application) GetAskMaxPriority() int32 {
 	return sa.askMaxPriority
 }
 
+// +checklocks:sa.RWMutex
 func (sa *Application) cleanupAsks() {
 	sa.requests = make(map[string]*Allocation)
 	sa.sortedRequests = nil
 }
 
+// +checklocks:sa.RWMutex
 func (sa *Application) cleanupTrackedResource() {
 	sa.usedResource = nil
 	sa.placeholderResource = nil
@@ -2293,6 +2387,7 @@ func (sa *Application) GetApplicationSummary(rmID string) *ApplicationSummary {
 	return sa.getApplicationSummary(rmID)
 }
 
+// +checklocksread:sa.RWMutex
 func (sa *Application) getApplicationSummary(rmID string) *ApplicationSummary {
 	return &ApplicationSummary{
 		ApplicationID:       sa.ApplicationID,
