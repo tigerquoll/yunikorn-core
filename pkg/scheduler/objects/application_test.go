@@ -2816,7 +2816,10 @@ func TestAddAllocationAskReplaceExistingPendingAsk(t *testing.T) {
 // but deliberately leaves sa.allocations alone until the shim confirms the releases, so a
 // SCHEDULING_FAILED_ON_RM release arriving in that window reaches RollbackAllocation, which looks the
 // entry up in sa.allocations and deallocates it. deallocateAsk must not resurrect that ask: putting
-// it back into sortedRequests would hand tryAllocate an ask the application does not track any more.
+// it back into sortedRequests would hand tryAllocate an ask the application does not track any more,
+// and re-adding its resource to sa.pending/queue pending would leak permanently - nothing tracks the
+// ask, so nothing ever subtracts it again, and the app could never satisfy the IsZero(pending) check
+// that gates the Completing transition.
 func TestRollbackAllocationAskNotTracked(t *testing.T) {
 	setupUGM()
 	defer setupUGM()
@@ -2847,6 +2850,8 @@ func TestRollbackAllocationAskNotTracked(t *testing.T) {
 	assert.Equal(t, len(app.pendingPriorities), 0, "rollback of an untracked ask must not change the pending histogram")
 	app.RUnlock()
 	assert.Equal(t, app.GetAskMaxPriority(), configs.MinPriority, "rollback of an untracked ask must not change askMaxPriority")
+	assert.Assert(t, resources.IsZero(app.GetPendingResource()), "rollback of an untracked ask must not re-add pending resource, got %v", app.GetPendingResource())
+	assert.Assert(t, resources.IsZero(queue.GetPendingResource()), "rollback of an untracked ask must not re-add queue pending resource, got %v", queue.GetPendingResource())
 	assertMaxPriorityConsistent(t, app)
 }
 
