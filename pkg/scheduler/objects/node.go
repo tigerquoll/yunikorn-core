@@ -171,8 +171,6 @@ func (sn *Node) GetCapacity() *resources.Resource {
 
 // SetCapacity changes the node resource capacity and returns the resource delta.
 // The delta is positive for an increased capacity and negative for a decrease.
-// Stated, not derived: a closure captures the receiver, hiding the acquisition from the derivation.
-// +checklocksexclude:sn.RWMutex
 func (sn *Node) SetCapacity(newCapacity *resources.Resource) *resources.Resource {
 	var delta *resources.Resource
 	defer func() {
@@ -342,8 +340,6 @@ func (sn *Node) FitInNode(resRequest *resources.Resource) bool {
 // Returns nil if the allocation was not found and no changes are made. If the allocation
 // is found the Allocation removed is returned. Used resources will decrease available
 // will increase as per the allocation removed.
-// Stated, not derived: a closure captures the receiver, hiding the acquisition from the derivation.
-// +checklocksexclude:sn.RWMutex
 func (sn *Node) RemoveAllocation(allocationKey string) *Allocation {
 	var alloc *Allocation
 	defer func() {

@@ -88,8 +88,6 @@ func (e *EventStreaming) PublishEvent(event *si.EventRecord) {
 //
 // Consumers have an arbitrary name for logging purposes. The "count" parameter defines the number
 // of maximum historical events from the ring buffer. "0" is a valid value and means no past events.
-// Stated, not derived: a closure captures the receiver, hiding the acquisition from the derivation.
-// +checklocksexclude:e.RWMutex
 func (e *EventStreaming) CreateEventStream(name string, count uint64) *EventStream {
 	consumer := make(chan *si.EventRecord, defaultChannelBufSize)
 	stream := &EventStream{

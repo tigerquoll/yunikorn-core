@@ -165,8 +165,6 @@ func (ec *EventSystemImpl) IsEventTrackingEnabled() bool {
 }
 
 // StartService starts the event processing in the background. See the interface for details.
-// Stated, not derived: the callee's own acquisition is hidden from the derivation the same way.
-// +checklocksexclude:ec.RWMutex
 func (ec *EventSystemImpl) StartService() {
 	ec.StartServiceWithPublisher(true)
 }
@@ -225,8 +223,6 @@ func (ec *EventSystemImpl) AddEvent(event *si.EventRecord) {
 
 // StartServiceWithPublisher starts the event processing background routines.
 // Only exported for testing.
-// Stated, not derived: a closure captures the receiver, hiding the acquisition from the derivation.
-// +checklocksexclude:ec.RWMutex
 func (ec *EventSystemImpl) StartServiceWithPublisher(withPublisher bool) {
 	ec.Lock()
 	defer ec.Unlock()
