@@ -57,14 +57,12 @@ func NewHealthChecker(schedulerContext *ClusterContext) *HealthChecker {
 	return checker
 }
 
-// +checklocksexcludewrite:c.RWMutex
 func (c *HealthChecker) GetPeriod() time.Duration {
 	c.RLock()
 	defer c.RUnlock()
 	return c.period
 }
 
-// +checklocksexcludewrite:c.RWMutex
 func (c *HealthChecker) IsEnabled() bool {
 	c.RLock()
 	defer c.RUnlock()
@@ -138,7 +136,6 @@ func (c *HealthChecker) startInternal(runImmediately bool) {
 	}
 }
 
-// +checklocksexclude:c.RWMutex
 func (c *HealthChecker) Stop() {
 	c.Lock()
 	defer c.Unlock()

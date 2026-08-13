@@ -28,6 +28,7 @@ import (
 	"github.com/apache/yunikorn-core/pkg/webservice/dao"
 )
 
+// +lockclass:UserTracker
 type UserTracker struct {
 	userName string // Name of the user for which usage is being tracked upon
 
@@ -136,7 +137,6 @@ func (ut *UserTracker) headroom(hierarchy []string) *resources.Resource {
 }
 
 // GetResourceUsageDAOInfo returns the DAO object used in the REST API for this user tracker
-// +checklocksexcludewrite:ut.RWMutex
 func (ut *UserTracker) GetResourceUsageDAOInfo() *dao.UserResourceUsageDAOInfo {
 	ut.RLock()
 	defer ut.RUnlock()
@@ -190,7 +190,6 @@ func (ut *UserTracker) canRunApp(hierarchy []string, applicationID string) bool 
 // GetMaxResources returns a map of the maxResources for all queues registered under this user tracker.
 // The key into the map is the queue path.
 // This should only be used in test
-// +checklocksexcludewrite:ut.RWMutex
 func (ut *UserTracker) GetMaxResources() map[string]*resources.Resource {
 	ut.RLock()
 	defer ut.RUnlock()
@@ -200,7 +199,6 @@ func (ut *UserTracker) GetMaxResources() map[string]*resources.Resource {
 // GetMaxApplications returns a map of the maxRunningApps for all queues registered under this user tracker.
 // The key into the map is the queue path.
 // This should only be used in test
-// +checklocksexcludewrite:ut.RWMutex
 func (ut *UserTracker) GetMaxApplications() map[string]uint64 {
 	ut.RLock()
 	defer ut.RUnlock()

@@ -209,7 +209,6 @@ func (rmp *RMProxy) handleRMEvents() {
 	}
 }
 
-// +checklocksexclude:rmp.RWMutex
 func (rmp *RMProxy) RegisterResourceManager(request *si.RegisterResourceManagerRequest, callback api.ResourceManagerCallback) (*si.RegisterResourceManagerResponse, error) {
 	rmp.Lock()
 	defer rmp.Unlock()
@@ -257,7 +256,6 @@ func (rmp *RMProxy) RegisterResourceManager(request *si.RegisterResourceManagerR
 	return nil, fmt.Errorf("registration of RM failed: %v", result.Reason)
 }
 
-// +checklocksexcludewrite:rmp.RWMutex
 func (rmp *RMProxy) GetResourceManagerCallback(rmID string) api.ResourceManagerCallback {
 	rmp.RLock()
 	defer rmp.RUnlock()

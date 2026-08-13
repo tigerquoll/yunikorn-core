@@ -55,7 +55,6 @@ func NewPlacementManager(rules []configs.PlacementRule, queueFunc func(string) *
 }
 
 // GetRulesDAO returns a list of RuleDAO objects of the configured rules
-// +checklocksexcludewrite:m.RWMutex
 func (m *AppPlacementManager) GetRulesDAO() []*dao.RuleDAO {
 	m.RLock()
 	defer m.RUnlock()
@@ -105,7 +104,6 @@ func (m *AppPlacementManager) initialise(rules []configs.PlacementRule, silence 
 // PlaceApplication executes the rules for the passed in application.
 // On success the queueName of the application is set to the queue the application wil run in.
 // On failure the queueName is set to "" and an error is returned.
-// +checklocksexcludewrite:m.RWMutex
 func (m *AppPlacementManager) PlaceApplication(app *objects.Application) error {
 	m.RLock()
 	defer m.RUnlock()

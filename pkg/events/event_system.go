@@ -158,7 +158,6 @@ func (ec *EventSystemImpl) GetEventsFromID(id, count uint64) ([]*si.EventRecord,
 }
 
 // IsEventTrackingEnabled whether history tracking is currently enabled or not.
-// +checklocksexcludewrite:ec.RWMutex
 func (ec *EventSystemImpl) IsEventTrackingEnabled() bool {
 	ec.RLock()
 	defer ec.RUnlock()
@@ -166,13 +165,11 @@ func (ec *EventSystemImpl) IsEventTrackingEnabled() bool {
 }
 
 // StartService starts the event processing in the background. See the interface for details.
-// +checklocksexclude:ec.RWMutex
 func (ec *EventSystemImpl) StartService() {
 	ec.StartServiceWithPublisher(true)
 }
 
 // Stop stops the event system, including the shim publisher if it was started.
-// +checklocksexclude:ec.RWMutex
 func (ec *EventSystemImpl) Stop() {
 	ec.Lock()
 	defer ec.Unlock()
@@ -199,7 +196,6 @@ func (ec *EventSystemImpl) GetEventStreams() []EventStreamData {
 }
 
 // AddEvent adds an event record to the event system. See the interface for details.
-// +checklocksexcludewrite:ec.RWMutex
 func (ec *EventSystemImpl) AddEvent(event *si.EventRecord) {
 	if event != nil {
 		event.Message = truncateEventMessage(event.Message)
@@ -227,7 +223,6 @@ func (ec *EventSystemImpl) AddEvent(event *si.EventRecord) {
 
 // StartServiceWithPublisher starts the event processing background routines.
 // Only exported for testing.
-// +checklocksexclude:ec.RWMutex
 func (ec *EventSystemImpl) StartServiceWithPublisher(withPublisher bool) {
 	ec.Lock()
 	defer ec.Unlock()

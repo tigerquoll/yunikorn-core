@@ -16,6 +16,19 @@
  limitations under the License.
 */
 
+// The taxonomy below is the same order the runtime checker in this package enforces, in the
+// form the static analyzer reads. The two are deliberately side by side so they cannot drift,
+// and TestDeclaredOrderMatchesAnnotations fails when they do.
+//
+// +lockorder:ClusterContext < PartitionContext
+// +lockorder:PartitionContext < Application
+// +lockorder:Application < Queue
+// +lockorder:Application < Node
+// +lockorder:Application < UGMManager
+// +lockorder:UGMManager < UserTracker
+// +lockorder:UGMManager < GroupTracker
+// +lockhierarchical:Queue
+// +lockorderwithheld:Application
 package locking
 
 import (

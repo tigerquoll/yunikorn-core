@@ -42,20 +42,14 @@ type eventRange struct {
 // If needed, we calculate the id of the event based on slice positions.
 //
 // Retrieving the records can be achieved with GetEventsFromID.
+// +checklocksguardedby:RWMutex
 type eventRingBuffer struct {
-	// +checklocks:RWMutex
-	events []*si.EventRecord
-	// +checklocks:RWMutex
-	capacity uint64 // capacity of the buffer
-	// +checklocks:RWMutex
-	head uint64 // position of the next element (no tail since we don't remove elements)
-	// +checklocks:RWMutex
-	full bool // indicates whether the buffer if full - once it is, it stays full unless the buffer is resized
-	// +checklocks:RWMutex
-	id uint64 // unique id of an event record
-	// +checklocks:RWMutex
-	lowestId uint64 // lowest id of an event record available in the buffer at any given time
-	// +checklocks:RWMutex
+	events       []*si.EventRecord
+	capacity     uint64 // capacity of the buffer
+	head         uint64 // position of the next element (no tail since we don't remove elements)
+	full         bool   // indicates whether the buffer if full - once it is, it stays full unless the buffer is resized
+	id           uint64 // unique id of an event record
+	lowestId     uint64 // lowest id of an event record available in the buffer at any given time
 	resizeOffset uint64 // used to aid the calculation of id->pos after resize (see id2pos)
 
 	locking.RWMutex
@@ -63,7 +57,6 @@ type eventRingBuffer struct {
 
 // Add adds an event to the ring buffer. If the buffer is full, the oldest element is overwritten.
 // This method never fails.
-// +checklocksexclude:e.RWMutex
 func (e *eventRingBuffer) Add(event *si.EventRecord) {
 	e.Lock()
 	defer e.Unlock()
@@ -80,7 +73,6 @@ func (e *eventRingBuffer) Add(event *si.EventRecord) {
 
 // GetRecentEvents returns the most recent "count" elements from the ring buffer.
 // It is allowed for "count" to be larger than the number of elements.
-// +checklocksexcludewrite:e.RWMutex
 func (e *eventRingBuffer) GetRecentEvents(count uint64) []*si.EventRecord {
 	e.RLock()
 	defer e.RUnlock()
@@ -102,7 +94,6 @@ func (e *eventRingBuffer) GetRecentEvents(count uint64) []*si.EventRecord {
 // identifier is returned which can be used to get the first batch.
 // If the caller does not want to pose limit on the number of events returned, "count" must be set to a high
 // value, e.g. math.MaxUint64.
-// +checklocksexcludewrite:e.RWMutex
 func (e *eventRingBuffer) GetEventsFromID(id uint64, count uint64) ([]*si.EventRecord, uint64, uint64) {
 	e.RLock()
 	defer e.RUnlock()
@@ -153,7 +144,6 @@ func (e *eventRingBuffer) getEventsFromID(id uint64, count uint64) ([]*si.EventR
 
 // GetLastEventID returns the value of the unique id counter.
 // If the buffer is empty, it returns 0.
-// +checklocksexcludewrite:e.RWMutex
 func (e *eventRingBuffer) GetLastEventID() uint64 {
 	e.RLock()
 	defer e.RUnlock()
@@ -238,7 +228,6 @@ func (e *eventRingBuffer) updateLowestID(beginSize, endSize uint64) {
 
 // Resize resizes the existing ring buffer
 // this method will be called upon configuration reload
-// +checklocksexclude:e.RWMutex
 func (e *eventRingBuffer) Resize(newSize uint64) {
 	e.Lock()
 	defer e.Unlock()

@@ -19,10 +19,13 @@
 
 module github.com/apache/yunikorn-core/scripts/checklocks
 
-// gvisor requires this version, it is higher than the version the scheduler itself needs.
-go 1.26.3
+go 1.25.0
 
-require gvisor.dev/gvisor v0.0.0-20260811011956-3434348e5909
+// The checklocks analyser is taken from a standalone module rather than from gvisor: it is the
+// gvisor analyser with three fixes that are still pending upstream, without which the annotations
+// in this repository either panic the tool or are silently dropped. The module is a temporary home
+// until a permanent one is sorted out.
+require github.com/tigerquoll/checklocks v0.6.1
 
 require (
 	golang.org/x/mod v0.34.0 // indirect

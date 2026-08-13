@@ -143,11 +143,22 @@ func eventDesc() fsm.Events {
 // only driven from HandleApplicationEvent and friends, which take the lock before handing
 // over to the fsm library. The analysis cannot see that, the application arrives as an
 // interface value in the event arguments and the dispatch happens inside the library, so
-// every access below is exempted individually.
+// each callback states it, naming the application the way its own body recovers it.
+//
+// These are lock preconditions and not exemptions: every body below is analysed with the
+// application lock held, so everything in it is checked. A write to a guarded field of any
+// other object, a call that must not be entered with this lock held, and taking the lock
+// again are all reported. The guards replace an ignore per callback, which said the same
+// thing to a reader and nothing at all to the analysis.
+//
+// A guard only has an effect if it matches an assertion in the body, and one that matches
+// nothing is silent rather than an error, so changing how a callback recovers its
+// application means changing the annotation with it.
 //
 //nolint:funlen
 func callbacks() fsm.Callbacks {
 	return fsm.Callbacks{
+		// +checklocks:event.Args[0].(*Application).RWMutex
 		"enter_state": func(_ context.Context, event *fsm.Event) {
 			app := event.Args[0].(*Application) //nolint:errcheck
 			log.Log(log.SchedFSM).Info("Application state transition",
@@ -158,10 +169,10 @@ func callbacks() fsm.Callbacks {
 
 			eventInfo := ""
 			if len(event.Args) == 2 {
-				eventInfo = event.Args[1].(string)  //nolint:errcheck
-				app.OnStateChange(event, eventInfo) // +checklocksignore
+				eventInfo = event.Args[1].(string) //nolint:errcheck
+				app.OnStateChange(event, eventInfo)
 			} else {
-				app.OnStateChange(event, "") // +checklocksignore
+				app.OnStateChange(event, "")
 			}
 			eventDetails, ok := stateEvents[event.Dst]
 			if !ok {
@@ -173,108 +184,123 @@ func callbacks() fsm.Callbacks {
 				app.appEvents.SendStateChangeEvent(app.ApplicationID, eventDetails, eventInfo)
 			}
 		},
+		// +checklocks:event.Args[0].(*Application).RWMutex
 		"leave_state": func(_ context.Context, event *fsm.Event) {
 			//nolint:errcheck
-			event.Args[0].(*Application).clearStateTimer() // +checklocksignore
+			event.Args[0].(*Application).clearStateTimer()
 		},
+		// +checklocks:event.Args[0].(*Application).RWMutex
 		fmt.Sprintf("leave_%s", New.String()): func(_ context.Context, event *fsm.Event) {
 			app := event.Args[0].(*Application) //nolint:errcheck
 			// only updated queue metrics because scheduler metrics are increased only for submission count
-			metrics.GetQueueMetrics(app.queuePath).DecQueueApplicationsNew() // +checklocksignore
+			metrics.GetQueueMetrics(app.queuePath).DecQueueApplicationsNew()
 		},
+		// +checklocks:event.Args[0].(*Application).RWMutex
 		fmt.Sprintf("enter_%s", Accepted.String()): func(_ context.Context, event *fsm.Event) {
-			app := event.Args[0].(*Application)                                   //nolint:errcheck
-			metrics.GetQueueMetrics(app.queuePath).IncQueueApplicationsAccepted() // +checklocksignore
+			app := event.Args[0].(*Application) //nolint:errcheck
+			metrics.GetQueueMetrics(app.queuePath).IncQueueApplicationsAccepted()
 			metrics.GetSchedulerMetrics().IncTotalApplicationsAccepted()
 		},
+		// +checklocks:event.Args[0].(*Application).RWMutex
 		fmt.Sprintf("leave_%s", Accepted.String()): func(_ context.Context, event *fsm.Event) {
 			app := event.Args[0].(*Application) //nolint:errcheck
 			// only updated queue metrics because scheduler metrics are increased only for submission count
-			metrics.GetQueueMetrics(app.queuePath).DecQueueApplicationsAccepted() // +checklocksignore
+			metrics.GetQueueMetrics(app.queuePath).DecQueueApplicationsAccepted()
 		},
+		// +checklocks:event.Args[0].(*Application).RWMutex
 		fmt.Sprintf("enter_%s", Rejected.String()): func(_ context.Context, event *fsm.Event) {
-			app := event.Args[0].(*Application)          //nolint:errcheck
-			qm := metrics.GetQueueMetrics(app.queuePath) // +checklocksignore
+			app := event.Args[0].(*Application) //nolint:errcheck
+			qm := metrics.GetQueueMetrics(app.queuePath)
 			qm.IncQueueApplicationsRejected()
 			qm.IncQueueApplicationsRejectedTotal()
 			metrics.GetSchedulerMetrics().IncTotalApplicationsRejected()
-			app.setStateTimer(terminatedTimeout, app.stateMachine.Current(), ExpireApplication) // +checklocksignore
-			app.finishedTime = time.Now()                                                       // +checklocksignore
-			app.cleanupTrackedResource()                                                        // +checklocksignore
+			app.setStateTimer(terminatedTimeout, app.stateMachine.Current(), ExpireApplication)
+			app.finishedTime = time.Now()
+			app.cleanupTrackedResource()
 			// No rejected message when use app.HandleApplicationEvent(RejectApplication)
 			if len(event.Args) == 2 {
 				//nolint:errcheck
-				app.rejectedMessage = event.Args[1].(string) // +checklocksignore
+				app.rejectedMessage = event.Args[1].(string)
 			}
 		},
+		// +checklocks:event.Args[0].(*Application).RWMutex
 		fmt.Sprintf("enter_%s", Running.String()): func(_ context.Context, event *fsm.Event) {
 			if event.Src != Running.String() {
-				app := event.Args[0].(*Application)                                  //nolint:errcheck
-				app.startTime = time.Now()                                           // +checklocksignore
-				app.queue.incRunningApps(app.ApplicationID)                          // +checklocksignore
-				metrics.GetQueueMetrics(app.queuePath).IncQueueApplicationsRunning() // +checklocksignore
+				app := event.Args[0].(*Application) //nolint:errcheck
+				app.startTime = time.Now()
+				app.queue.incRunningApps(app.ApplicationID)
+				metrics.GetQueueMetrics(app.queuePath).IncQueueApplicationsRunning()
 				metrics.GetSchedulerMetrics().IncTotalApplicationsRunning()
 			}
 		},
+		// +checklocks:event.Args[0].(*Application).RWMutex
 		fmt.Sprintf("leave_%s", Running.String()): func(_ context.Context, event *fsm.Event) {
 			if event.Dst != Running.String() {
-				app := event.Args[0].(*Application)                                  //nolint:errcheck
-				app.queue.decRunningApps()                                           // +checklocksignore
-				metrics.GetQueueMetrics(app.queuePath).DecQueueApplicationsRunning() // +checklocksignore
+				app := event.Args[0].(*Application) //nolint:errcheck
+				app.queue.decRunningApps()
+				metrics.GetQueueMetrics(app.queuePath).DecQueueApplicationsRunning()
 				metrics.GetSchedulerMetrics().DecTotalApplicationsRunning()
 			}
 		},
+		// +checklocks:event.Args[0].(*Application).RWMutex
 		fmt.Sprintf("enter_%s", Resuming.String()): func(_ context.Context, event *fsm.Event) {
-			app := event.Args[0].(*Application)                                   //nolint:errcheck
-			metrics.GetQueueMetrics(app.queuePath).IncQueueApplicationsResuming() // +checklocksignore
+			app := event.Args[0].(*Application) //nolint:errcheck
+			metrics.GetQueueMetrics(app.queuePath).IncQueueApplicationsResuming()
 			metrics.GetSchedulerMetrics().IncTotalApplicationsResuming()
 		},
+		// +checklocks:event.Args[0].(*Application).RWMutex
 		fmt.Sprintf("leave_%s", Resuming.String()): func(_ context.Context, event *fsm.Event) {
-			app := event.Args[0].(*Application)                                   //nolint:errcheck
-			metrics.GetQueueMetrics(app.queuePath).DecQueueApplicationsResuming() // +checklocksignore
+			app := event.Args[0].(*Application) //nolint:errcheck
+			metrics.GetQueueMetrics(app.queuePath).DecQueueApplicationsResuming()
 			metrics.GetSchedulerMetrics().DecTotalApplicationsResuming()
 		},
+		// +checklocks:event.Args[0].(*Application).RWMutex
 		fmt.Sprintf("enter_%s", Failing.String()): func(_ context.Context, event *fsm.Event) {
-			app := event.Args[0].(*Application)                                  //nolint:errcheck
-			metrics.GetQueueMetrics(app.queuePath).IncQueueApplicationsFailing() // +checklocksignore
+			app := event.Args[0].(*Application) //nolint:errcheck
+			metrics.GetQueueMetrics(app.queuePath).IncQueueApplicationsFailing()
 			metrics.GetSchedulerMetrics().IncTotalApplicationsFailing()
 		},
+		// +checklocks:event.Args[0].(*Application).RWMutex
 		fmt.Sprintf("leave_%s", Failing.String()): func(_ context.Context, event *fsm.Event) {
-			app := event.Args[0].(*Application)                                  //nolint:errcheck
-			metrics.GetQueueMetrics(app.queuePath).DecQueueApplicationsFailing() // +checklocksignore
+			app := event.Args[0].(*Application) //nolint:errcheck
+			metrics.GetQueueMetrics(app.queuePath).DecQueueApplicationsFailing()
 			metrics.GetSchedulerMetrics().DecTotalApplicationsFailing()
 		},
+		// +checklocks:event.Args[0].(*Application).RWMutex
 		fmt.Sprintf("enter_%s", Completing.String()): func(_ context.Context, event *fsm.Event) {
-			app := event.Args[0].(*Application)                                                   //nolint:errcheck
-			app.setStateTimer(completingTimeout, app.stateMachine.Current(), CompleteApplication) // +checklocksignore
-			metrics.GetQueueMetrics(app.queuePath).IncQueueApplicationsCompleting()               // +checklocksignore
+			app := event.Args[0].(*Application) //nolint:errcheck
+			app.setStateTimer(completingTimeout, app.stateMachine.Current(), CompleteApplication)
+			metrics.GetQueueMetrics(app.queuePath).IncQueueApplicationsCompleting()
 			metrics.GetSchedulerMetrics().IncTotalApplicationsCompleting()
 		},
+		// +checklocks:event.Args[0].(*Application).RWMutex
 		fmt.Sprintf("leave_%s", Completing.String()): func(_ context.Context, event *fsm.Event) {
-			app := event.Args[0].(*Application)                                     //nolint:errcheck
-			metrics.GetQueueMetrics(app.queuePath).DecQueueApplicationsCompleting() // +checklocksignore
+			app := event.Args[0].(*Application) //nolint:errcheck
+			metrics.GetQueueMetrics(app.queuePath).DecQueueApplicationsCompleting()
 			metrics.GetSchedulerMetrics().DecTotalApplicationsCompleting()
 		},
+		// +checklocks:event.Args[0].(*Application).RWMutex
 		fmt.Sprintf("enter_%s", Completed.String()): func(_ context.Context, event *fsm.Event) {
 			app := event.Args[0].(*Application) //nolint:errcheck
 			metrics.GetSchedulerMetrics().IncTotalApplicationsCompleted()
-			qm := metrics.GetQueueMetrics(app.queuePath) // +checklocksignore
+			qm := metrics.GetQueueMetrics(app.queuePath)
 			qm.IncQueueApplicationsCompleted()
 			qm.IncQueueApplicationsCompletedTotal()
-			app.setStateTimer(terminatedTimeout, app.stateMachine.Current(), ExpireApplication) // +checklocksignore
-			app.executeTerminatedCallback()                                                     // +checklocksignore
-			app.clearPlaceholderTimer()                                                         // +checklocksignore
-			app.cleanupAsks()                                                                   // +checklocksignore
+			app.setStateTimer(terminatedTimeout, app.stateMachine.Current(), ExpireApplication)
+			app.executeTerminatedCallback()
+			app.clearPlaceholderTimer()
+			app.cleanupAsks()
 		},
+		// +checklocks:event.Args[0].(*Application).RWMutex
 		fmt.Sprintf("enter_%s", Failed.String()): func(_ context.Context, event *fsm.Event) {
 			app := event.Args[0].(*Application) //nolint:errcheck
 			metrics.GetSchedulerMetrics().IncTotalApplicationsFailed()
-			qm := metrics.GetQueueMetrics(app.queuePath) // +checklocksignore
+			qm := metrics.GetQueueMetrics(app.queuePath)
 			qm.IncQueueApplicationsFailed()
 			qm.IncQueueApplicationsFailedTotal()
-			app.setStateTimer(terminatedTimeout, app.stateMachine.Current(), ExpireApplication) // +checklocksignore
-			app.executeTerminatedCallback()                                                     // +checklocksignore
-			app.cleanupAsks()                                                                   // +checklocksignore
+			app.setStateTimer(terminatedTimeout, app.stateMachine.Current(), ExpireApplication)
+			app.executeTerminatedCallback()
+			app.cleanupAsks()
 		},
 	}
 }

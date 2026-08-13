@@ -109,21 +109,26 @@ GOLANGCI_LINT_ARCHIVEBASE=golangci-lint-$(GOLANGCI_LINT_VERSION)-$(OS)-$(EXEC_AR
 GOLANGCI_LINT_ARCHIVE=$(GOLANGCI_LINT_ARCHIVEBASE).tar.gz
 
 # checklocks
-# The version is pinned in the go.mod of the tools module, gvisor does not publish semantic
-# versions, only date based pseudo versions: update by picking a newer pseudo version from
-# the gvisor master branch and running "go mod tidy" in the tools module.
+# The version is pinned in the go.mod of the tools module: bump it with "go get" in that directory
+# followed by "go mod tidy".
 CHECKLOCKS_MOD_DIR=scripts/checklocks
-CHECKLOCKS_VERSION=$(shell "$(GO)" list -C "$(CHECKLOCKS_MOD_DIR)" -m -f '{{ .Version }}' gvisor.dev/gvisor)
+CHECKLOCKS_VERSION=$(shell "$(GO)" list -C "$(CHECKLOCKS_MOD_DIR)" -m -f '{{ .Version }}' github.com/tigerquoll/checklocks)
 # The path is keyed on the go version as well as the checklocks version: the export data of a
 # vet tool must match the toolchain that runs "go vet", so a go upgrade must rebuild the tool.
 CHECKLOCKS_PATH=${TOOLS_DIR}/checklocks-$(CHECKLOCKS_VERSION)-$(shell "$(GO)" env GOVERSION)
 CHECKLOCKS_BIN=$(CHECKLOCKS_PATH)/checklocks
 # The go version the tools module needs against the version that is running, both without the
-# "go" prefix. Read from the go directive so that a gvisor update cannot make these drift.
+# "go" prefix. Read from the go directive so that a tool update cannot make these drift.
 CHECKLOCKS_GO_REQUIRED=$(shell "$(GO)" list -C "$(CHECKLOCKS_MOD_DIR)" -m -f '{{ .GoVersion }}')
 CHECKLOCKS_GO_CURRENT=$(patsubst go%,%,$(shell "$(GO)" env GOVERSION))
 # Fixture holding a known lock violation, see the checklocks target.
 CHECKLOCKS_CANARY=pkg/locking/checklocks_canary.go
+# The messages the canary must produce, one per class of violation it holds.
+# The last two are the derived facts: an exclusion the canary does not state, and a field guard
+# the canary states on the type rather than on the field. Both are required by name because the
+# other messages here would keep the canary green if either derivation were lost, and hundreds of
+# annotations were deleted from this repository on the strength of them.
+CHECKLOCKS_CANARY_MESSAGES := "invalid field access" "must not hold" "already locked" "to call callbackSelfLocking" "guarded read races" "the declared order has" "a wait under a lock" "to call derivedSelfLocking" "when accessing structGuardedValue"
 
 all:
 	$(MAKE) -C $(dir $(BASE_DIR)) build
@@ -148,15 +153,13 @@ $(GOLANGCI_LINT_BIN):
 		| tar -x -z --strip-components=1 -C "$(GOLANGCI_LINT_PATH)" "$(GOLANGCI_LINT_ARCHIVEBASE)/golangci-lint"
 
 # Install checklocks
-# Built from the tools module in $(CHECKLOCKS_MOD_DIR): gvisor is a tool only dependency and
+# Built from the tools module in $(CHECKLOCKS_MOD_DIR): the analyser is a tool only dependency and
 # must not end up in the go.mod of the scheduler. Building from a module instead of using
-# "go install pkg@version" pins the whole dependency tree via its go.sum. That module needs a
-# newer go than the scheduler does, so the go directive there is higher than the one in the
-# main go.mod on purpose.
+# "go install pkg@version" pins the whole dependency tree via its go.sum.
 $(CHECKLOCKS_BIN): | checklocks-toolchain
 	@echo "installing checklocks $(CHECKLOCKS_VERSION)"
 	@mkdir -p "$(CHECKLOCKS_PATH)"
-	@"$(GO)" build -C "$(CHECKLOCKS_MOD_DIR)" -o "$(BASE_DIR)$(CHECKLOCKS_BIN)" gvisor.dev/gvisor/tools/checklocks/cmd/checklocks
+	@"$(GO)" build -C "$(CHECKLOCKS_MOD_DIR)" -o "$(BASE_DIR)$(CHECKLOCKS_BIN)" github.com/tigerquoll/checklocks/cmd/checklocks
 
 # Refuse to build or run the analyser with a go that is older than the tools module needs.
 # A vet tool must be built with the toolchain that runs "go vet" or the export data does not
@@ -188,27 +191,38 @@ CHECKLOCKS_PACKAGES := $(REPO)/...
 # variant of a package so the file list of each package is passed instead. Inferred locks are
 # turned off: those are guesses based on how often a field happens to be used under a lock,
 # they are not the documented intent and they change as unrelated code changes.
+# The vet tool runs several analyses and every one of them is named on the command line. Naming
+# them is not the same as taking the default: an analysis added by a later version of the tool
+# then has to be adopted deliberately instead of appearing as a wall of findings on an unrelated
+# change. Each analysis has its flags under its own name, "-lockorder.hierarchy" is left at its
+# default of off: it compares instances, which a summary cannot carry, so it is a hand run tool
+# rather than a gate.
+CHECKLOCKS_ANALYZERS := -checklocks -lockstringer -lockorder -lockblocking
+CHECKLOCKS_FLAGS := $(CHECKLOCKS_ANALYZERS) -checklocks.inferred=false
 checklocks: $(CHECKLOCKS_BIN)
 	@echo "running checklocks"
 	@"$(GO)" list -f '{{if .GoFiles}}{{$$dir := .Dir}}{{range .GoFiles}}{{$$dir}}/{{.}} {{end}}{{end}}' $(CHECKLOCKS_PACKAGES) | \
 	while read -r gofiles; do \
 		[ -n "$$gofiles" ] || continue; \
-		"$(GO)" vet "-vettool=$(BASE_DIR)$(CHECKLOCKS_BIN)" -inferred=false $$gofiles || exit 1; \
+		"$(GO)" vet "-vettool=$(BASE_DIR)$(CHECKLOCKS_BIN)" $(CHECKLOCKS_FLAGS) $$gofiles || exit 1; \
 	done
 # Prove that the analysis still detects anything at all. The canary is a file with known
 # violations that no build compiles, it is passed explicitly which makes the analysis ignore
 # its build constraint. It is checked together with the locking package as it uses the locks
 # defined there. Both the exit code and the messages are checked: a canary that fails to build
-# or is not found would otherwise look exactly like a violation that was caught. Both classes
-# of violation are required, a guarded field used without the lock and a call into a method
-# that must not be called with the lock held, as they are detected independently.
+# or is not found would otherwise look exactly like a violation that was caught. Every class of
+# violation is required separately, one per analysis plus the second checklocks one, as they are
+# detected independently: an analysis that stops reporting or that is dropped from the command
+# line above would otherwise leave the canary green on the strength of the other messages.
 	@canary="$$("$(GO)" list -f '{{$$dir := .Dir}}{{range .GoFiles}}{{$$dir}}/{{.}} {{end}}' $(REPO)/locking) $(BASE_DIR)$(CHECKLOCKS_CANARY)"; \
-	report=$$("$(GO)" vet "-vettool=$(BASE_DIR)$(CHECKLOCKS_BIN)" -inferred=false $$canary 2>&1); \
+	report=$$("$(GO)" vet "-vettool=$(BASE_DIR)$(CHECKLOCKS_BIN)" $(CHECKLOCKS_FLAGS) $$canary 2>&1); \
 	found=$$?; \
-	if [ $$found -eq 0 ] || \
-		! printf '%s' "$$report" | grep -q "invalid field access" || \
-		! printf '%s' "$$report" | grep -q "must not hold"; then \
-		echo "checklocks canary failed: analyzer did not detect a known violation"; \
+	missing=""; \
+	for message in $(CHECKLOCKS_CANARY_MESSAGES); do \
+		printf '%s' "$$report" | grep -q "$$message" || missing="$$missing $$message"; \
+	done; \
+	if [ $$found -eq 0 ] || [ -n "$$missing" ]; then \
+		echo "checklocks canary failed: analyzer did not detect a known violation:$$missing"; \
 		printf '%s\n' "$$report"; \
 		exit 1; \
 	fi

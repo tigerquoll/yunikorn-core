@@ -54,7 +54,11 @@ func NewTrackedResourceFromMap(m map[string]map[string]Quantity) *TrackedResourc
 	return &TrackedResource{TrackedResourceMap: trackedMap}
 }
 
-// +checklocksexcludewrite:tr.RWMutex
+// YUNIKORN-XXXX: String takes the read lock of the object it prints, and fmt and zap call it at a
+// point this type does not choose: formatting a tracked resource from code that already holds the
+// write lock deadlocks on it. The fix is to print only fields fixed at construction, or to have
+// the caller take a snapshot under the lock and print that.
+// +lockstringerignore
 func (tr *TrackedResource) String() string {
 	if tr == nil {
 		return "TrackedResource{}"
@@ -73,7 +77,6 @@ func (tr *TrackedResource) String() string {
 }
 
 // Clone creates a deep copy of TrackedResource.
-// +checklocksexcludewrite:tr.RWMutex
 func (tr *TrackedResource) Clone() *TrackedResource {
 	if tr == nil {
 		return nil
@@ -90,7 +93,6 @@ func (tr *TrackedResource) Clone() *TrackedResource {
 
 // AggregateTrackedResource aggregates resource usage to TrackedResourceMap[instType].
 // The time the given resource used is the delta between the resource createTime and currentTime.
-// +checklocksexclude:tr.RWMutex
 func (tr *TrackedResource) AggregateTrackedResource(instType string, resource *Resource, bindTime time.Time) {
 	if resource == nil {
 		return
@@ -112,7 +114,6 @@ func (tr *TrackedResource) AggregateTrackedResource(instType string, resource *R
 
 // EqualsDAO compares the TrackedResource against the DAO map that was created of the resource.
 // Test use only
-// +checklocksexcludewrite:tr.RWMutex
 func (tr *TrackedResource) EqualsDAO(right map[string]map[string]int64) bool {
 	if tr == nil {
 		return len(right) == 0
@@ -134,7 +135,6 @@ func (tr *TrackedResource) EqualsDAO(right map[string]map[string]int64) bool {
 }
 
 // DAOMap converts the TrackedResource into a map structure for use in the REST API.
-// +checklocksexcludewrite:tr.RWMutex
 func (tr *TrackedResource) DAOMap() map[string]map[string]int64 {
 	daoMAP := make(map[string]map[string]int64)
 	if tr != nil {

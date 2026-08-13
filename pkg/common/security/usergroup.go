@@ -112,7 +112,6 @@ func GetUserGroupCache(ugr configs.UserGroupResolver, ldapConfigReader ConfigRea
 }
 
 // GetResolverType returns the type of resolver configured
-// +checklocksexcludewrite:c.lock
 func (c *UserGroupCache) GetResolverType() string {
 	c.lock.RLock()
 	defer c.lock.RUnlock()
@@ -166,7 +165,6 @@ func (c *UserGroupCache) resetCache() {
 	c.ugs = make(map[string]*UserGroup) // +checklocksignore
 }
 
-// +checklocksexclude:c.lock
 func (c *UserGroupCache) ConvertUGI(ugi *si.UserGroupInformation, force bool) (UserGroup, error) {
 	// check if we have a user to convert
 	if ugi == nil || ugi.User == "" {
@@ -207,7 +205,11 @@ func (c *UserGroupCache) ConvertUGI(ugi *si.UserGroupInformation, force bool) (U
 // GetUserGroup get the user group information for a singe user. An error will still return a UserGroup.
 // The Failed flag in the object will be set to true for any failures.
 // The information is cached, negatively and positively.
-// +checklocksexclude:c.lock
+// The resolver is reached through a function valued field, so no analysis can see that this
+// call ends in os/user, and from there in the name service switch and whatever directory it
+// is configured against. The declaration is what says so.
+//
+// +blocking
 func (c *UserGroupCache) GetUserGroup(userName string) (UserGroup, error) {
 	// check if we have a user to resolve
 	if userName == "" {
@@ -263,7 +265,6 @@ func (c *UserGroupCache) GetUserGroup(userName string) (UserGroup, error) {
 }
 
 // Stop the currently running cache cleaner and reset the resolver.
-// +checklocksexclude:c.lock
 func (c *UserGroupCache) Stop() {
 	// make sure that in case of multiple partitions, we call Stop() only once (the instance is shared)
 	// see ClusterContext.Stop()

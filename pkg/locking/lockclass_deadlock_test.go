@@ -21,11 +21,113 @@
 package locking
 
 import (
+	"go/parser"
+	"go/token"
+	"sort"
+	"strings"
 	"sync"
 	"testing"
 
 	"gotest.tools/v3/assert"
 )
+
+// annotationClass maps the name a class carries in the static annotations at the top of
+// lockclass.go to the class of the runtime checker. Only the manager differs: the runtime name
+// is qualified with its package, which reads better in a report than in an annotation.
+var annotationClass = map[string]Class{
+	"ClusterContext":   ClassClusterContext,
+	"PartitionContext": ClassPartitionContext,
+	"Application":      ClassApplication,
+	"Queue":            ClassQueue,
+	"Node":             ClassNode,
+	"UGMManager":       ClassUGMManager,
+	"UserTracker":      ClassUserTracker,
+	"GroupTracker":     ClassGroupTracker,
+}
+
+// orderAnnotations parses the order the static analyzer reads out of the package doc of
+// lockclass.go: the edges, the hierarchical classes and the classes whose same class rule is
+// withheld. The file is parsed rather than the annotations being repeated here, so that the
+// test compares the two declarations instead of comparing a copy of one with the other.
+func orderAnnotations(t *testing.T) (edges [][2]Class, hier, withheld map[Class]bool) {
+	t.Helper()
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "lockclass.go", nil, parser.ParseComments)
+	assert.NilError(t, err, "parsing the file that declares the order")
+	assert.Assert(t, file.Doc != nil, "lockclass.go must carry the annotated order in its package doc")
+
+	class := func(name string) Class {
+		t.Helper()
+		c, ok := annotationClass[name]
+		assert.Assert(t, ok, "the annotations name a class the runtime checker does not have: %s", name)
+		return c
+	}
+	hier = make(map[Class]bool)
+	withheld = make(map[Class]bool)
+	for _, c := range file.Doc.List {
+		text := strings.TrimSpace(strings.TrimPrefix(c.Text, "//"))
+		switch {
+		case strings.HasPrefix(text, "+lockorder:"):
+			before, after, ok := strings.Cut(strings.TrimPrefix(text, "+lockorder:"), "<")
+			assert.Assert(t, ok, "an order annotation must read \"A < B\": %s", text)
+			edges = append(edges, [2]Class{class(strings.TrimSpace(before)), class(strings.TrimSpace(after))})
+		case strings.HasPrefix(text, "+lockhierarchical:"):
+			hier[class(strings.TrimSpace(strings.TrimPrefix(text, "+lockhierarchical:")))] = true
+		case strings.HasPrefix(text, "+lockorderwithheld:"):
+			withheld[class(strings.TrimSpace(strings.TrimPrefix(text, "+lockorderwithheld:")))] = true
+		}
+	}
+	return edges, hier, withheld
+}
+
+// classSet turns the flag array of the checker into a set, so both sides of a comparison are
+// written the same way.
+func classSet(flags [numClasses]bool) map[Class]bool {
+	set := make(map[Class]bool)
+	for c := Class(1); c < numClasses; c++ {
+		if flags[c] {
+			set[c] = true
+		}
+	}
+	return set
+}
+
+// edgeStrings renders a set of edges as sorted text, which makes a mismatch readable.
+func edgeStrings(edges [][2]Class) []string {
+	out := make([]string, 0, len(edges))
+	for _, e := range edges {
+		out = append(out, e[0].String()+" < "+e[1].String())
+	}
+	sort.Strings(out)
+	return out
+}
+
+// TestDeclaredOrderMatchesAnnotations is the guard on the one thing that keeps the runtime
+// checker in this package and the static analyzer of the "checklocks" make target enforcing the
+// same rule: the order declared in the annotations of lockclass.go and the order enforced below
+// must be the same graph. Either declaration can be edited on its own, and a drift between them
+// is silent: the static side would then pass the code the runtime side rejects, or the other way
+// round, with no build ever failing.
+func TestDeclaredOrderMatchesAnnotations(t *testing.T) {
+	annotatedEdges, annotatedHier, annotatedWithheld := orderAnnotations(t)
+
+	assert.DeepEqual(t, edgeStrings(annotatedEdges), edgeStrings(declaredOrder))
+	assert.DeepEqual(t, annotatedHier, classSet(hierarchical))
+	assert.DeepEqual(t, annotatedWithheld, classSet(sameClassWithheld))
+
+	// A class the annotations have no name for cannot be kept in step, so adding one to the
+	// checker must fail here rather than quietly leave the static side without it.
+	for c := Class(1); c < numClasses; c++ {
+		named := false
+		for _, mapped := range annotationClass {
+			if mapped == c {
+				named = true
+				break
+			}
+		}
+		assert.Assert(t, named, "class %s has no name in the annotations", c)
+	}
+}
 
 // resetClassCheck puts the checker back into a known state: no goroutine holds anything, no pair
 // has been reported and no deadlock has been flagged.

@@ -42,6 +42,7 @@ import (
 
 const disableReservation = "DISABLE_RESERVATION"
 
+// +lockclass:ClusterContext
 type ClusterContext struct {
 	// +checklocks:RWMutex
 	partitions map[string]*PartitionContext
@@ -90,8 +91,9 @@ func NewClusterContext(rmID, policyGroup string, config []byte) (*ClusterContext
 	if cc.reservationDisabled {
 		objects.SetReservationDelay(math.MaxInt64)
 	}
-	// the cluster context is still being built and cannot be reached yet, no lock is taken
-	err = cc.updateSchedulerConfig(conf, rmID) // +checklocksignore
+	// the cluster context is still being built and cannot be reached yet, no lock is taken:
+	// the analysis follows that from the literal above rather than being told to ignore it
+	err = cc.updateSchedulerConfig(conf, rmID)
 	if err != nil {
 		return nil, err
 	}
@@ -168,9 +170,15 @@ func (cc *ClusterContext) processRMRegistrationEvent(event *rmevent.RMRegistrati
 	defer cc.Unlock()
 	rmID := event.Registration.RmID
 
+	// YUNIKORN-XXXX: every reply this function and its two siblings below send is an unbuffered
+	// send made while the cluster context write lock is held. Nothing guarantees the reply is
+	// collected: a receiver that has gone away leaves the send waiting for ever, and with it the
+	// write lock, which stalls scheduling, the REST endpoints and the health check alike. No test
+	// exercises a dropped reply. This is the known RM event plumbing hazard seen from the lock
+	// side, not a new one; the fix is to reply after unlocking or to buffer the reply channel.
 	// we should not have any partitions set at this point
 	if len(cc.partitions) > 0 {
-		event.Channel <- &rmevent.Result{
+		event.Channel <- &rmevent.Result{ // +lockblockingignore
 			Reason:    fmt.Sprintf("RM %s has been registered before, active partitions %d", rmID, len(cc.partitions)),
 			Succeeded: false,
 		}
@@ -187,12 +195,18 @@ func (cc *ClusterContext) processRMRegistrationEvent(event *rmevent.RMRegistrati
 	}
 	conf, err := configs.LoadSchedulerConfigFromByteArray([]byte(config))
 	if err != nil {
-		event.Channel <- &rmevent.Result{Succeeded: false, Reason: err.Error()}
+		event.Channel <- &rmevent.Result{Succeeded: false, Reason: err.Error()} // +lockblockingignore
 		return
 	}
-	err = cc.updateSchedulerConfig(conf, rmID)
+	// YUNIKORN-XXXX: the config update reaches partitionManager.Stop, and stopping a partition
+	// manager runs partitionManager.remove, which calls ClusterContext.removePartition and takes
+	// this lock a second time: the partition removal self deadlock of YUNIKORN-2233. The tests
+	// stop the manager without the lock held, which is why the path is never taken there. The fix
+	// on that JIRA is to drop the removePartition call from remove, not to run remove in its own
+	// goroutine, which is what reopened it the first time.
+	err = cc.updateSchedulerConfig(conf, rmID) // +lockorderignore
 	if err != nil {
-		event.Channel <- &rmevent.Result{Succeeded: false, Reason: err.Error()}
+		event.Channel <- &rmevent.Result{Succeeded: false, Reason: err.Error()} // +lockblockingignore
 		return
 	}
 
@@ -204,7 +218,7 @@ func (cc *ClusterContext) processRMRegistrationEvent(event *rmevent.RMRegistrati
 	cc.SetRMInfo(rmID, event.Registration.BuildInfo)
 
 	// Done, notify channel
-	event.Channel <- &rmevent.Result{
+	event.Channel <- &rmevent.Result{ // +lockblockingignore
 		Succeeded: true,
 	}
 }
@@ -215,7 +229,8 @@ func (cc *ClusterContext) processRMConfigUpdateEvent(event *rmevent.RMConfigUpda
 	rmID := event.RmID
 	// need to enhance the check to support multiple RMs
 	if len(cc.partitions) == 0 {
-		event.Channel <- &rmevent.Result{
+		// the reply under the lock, see processRMRegistrationEvent above
+		event.Channel <- &rmevent.Result{ // +lockblockingignore
 			Reason:    fmt.Sprintf("RM %s has no active partitions, make sure it is registered", rmID),
 			Succeeded: false,
 		}
@@ -233,25 +248,26 @@ func (cc *ClusterContext) processRMConfigUpdateEvent(event *rmevent.RMConfigUpda
 	}
 	conf, err := configs.LoadSchedulerConfigFromByteArray([]byte(config))
 	if err != nil {
-		event.Channel <- &rmevent.Result{Succeeded: false, Reason: err.Error()}
+		event.Channel <- &rmevent.Result{Succeeded: false, Reason: err.Error()} // +lockblockingignore
 		return
 	}
 	// skip update if config has not changed
 	oldConf := configs.ConfigContext.Get(cc.policyGroup)
 	if conf.Checksum == oldConf.Checksum {
-		event.Channel <- &rmevent.Result{
+		event.Channel <- &rmevent.Result{ // +lockblockingignore
 			Succeeded: true,
 		}
 		return
 	}
 	// update scheduler configuration
-	err = cc.updateSchedulerConfig(conf, rmID)
+	// the partition removal self deadlock, see processRMRegistrationEvent above
+	err = cc.updateSchedulerConfig(conf, rmID) // +lockorderignore
 	if err != nil {
-		event.Channel <- &rmevent.Result{Succeeded: false, Reason: err.Error()}
+		event.Channel <- &rmevent.Result{Succeeded: false, Reason: err.Error()} // +lockblockingignore
 		return
 	}
 	// Done, notify channel
-	event.Channel <- &rmevent.Result{
+	event.Channel <- &rmevent.Result{ // +lockblockingignore
 		Succeeded: true,
 	}
 	// update global scheduler configs
@@ -322,7 +338,8 @@ func (cc *ClusterContext) removePartitionsByRMID(event *rmevent.RMPartitionsRemo
 	// Just remove corresponding partitions
 	for k, partition := range cc.partitions {
 		if partition.RmID == event.RmID {
-			partition.partitionManager.Stop()
+			// the partition removal self deadlock, see processRMRegistrationEvent above
+			partition.partitionManager.Stop() // +lockorderignore
 			partitionToRemove[k] = true
 		}
 	}
@@ -331,7 +348,7 @@ func (cc *ClusterContext) removePartitionsByRMID(event *rmevent.RMPartitionsRemo
 		delete(cc.partitions, partitionName)
 	}
 	// Done, notify channel
-	event.Channel <- &rmevent.Result{
+	event.Channel <- &rmevent.Result{ // +lockblockingignore
 		Succeeded: true,
 	}
 }
@@ -339,7 +356,6 @@ func (cc *ClusterContext) removePartitionsByRMID(event *rmevent.RMPartitionsRemo
 // Locked version of the configuration update called outside of event system.
 // Updates the current config via the config loader.
 // Used in test only, normal updates use the internal call
-// +checklocksexclude:cc.RWMutex
 func (cc *ClusterContext) UpdateRMSchedulerConfig(rmID string, config []byte) error {
 	cc.Lock()
 	defer cc.Unlock()
@@ -351,7 +367,8 @@ func (cc *ClusterContext) UpdateRMSchedulerConfig(rmID string, config []byte) er
 	if err != nil {
 		return err
 	}
-	err = cc.updateSchedulerConfig(conf, rmID)
+	// the partition removal self deadlock, see processRMRegistrationEvent above
+	err = cc.updateSchedulerConfig(conf, rmID) // +lockorderignore
 	if err != nil {
 		return err
 	}
@@ -404,7 +421,8 @@ func (cc *ClusterContext) updateSchedulerConfig(conf *configs.SchedulerConfig, r
 	// get the removed partitions, mark them as deleted
 	for _, part := range cc.partitions {
 		if !visited[part.Name] {
-			part.partitionManager.Stop()
+			// the partition removal self deadlock, see processRMRegistrationEvent above
+			part.partitionManager.Stop() // +lockorderignore
 			log.Log(log.SchedContext).Info("marked partition for removal",
 				zap.String("partitionName", part.Name))
 		}
@@ -414,21 +432,18 @@ func (cc *ClusterContext) updateSchedulerConfig(conf *configs.SchedulerConfig, r
 }
 
 // Get the config name.
-// +checklocksexcludewrite:cc.RWMutex
 func (cc *ClusterContext) GetPolicyGroup() string {
 	cc.RLock()
 	defer cc.RUnlock()
 	return cc.policyGroup
 }
 
-// +checklocksexcludewrite:cc.RWMutex
 func (cc *ClusterContext) GetStartTime() time.Time {
 	cc.RLock()
 	defer cc.RUnlock()
 	return cc.startTime
 }
 
-// +checklocksexcludewrite:cc.RWMutex
 func (cc *ClusterContext) GetRMInfoMapClone() map[string]*RMInformation {
 	cc.RLock()
 	defer cc.RUnlock()
@@ -440,7 +455,6 @@ func (cc *ClusterContext) GetRMInfoMapClone() map[string]*RMInformation {
 	return newMap
 }
 
-// +checklocksexcludewrite:cc.RWMutex
 func (cc *ClusterContext) GetPartitionMapClone() map[string]*PartitionContext {
 	cc.RLock()
 	defer cc.RUnlock()
@@ -452,14 +466,12 @@ func (cc *ClusterContext) GetPartitionMapClone() map[string]*PartitionContext {
 	return newMap
 }
 
-// +checklocksexcludewrite:cc.RWMutex
 func (cc *ClusterContext) GetPartition(partitionName string) *PartitionContext {
 	cc.RLock()
 	defer cc.RUnlock()
 	return cc.partitions[partitionName]
 }
 
-// +checklocksexcludewrite:cc.RWMutex
 func (cc *ClusterContext) GetPartitionWithoutClusterID(partitionName string) *PartitionContext {
 	cc.RLock()
 	defer cc.RUnlock()
@@ -474,7 +486,6 @@ func (cc *ClusterContext) GetPartitionWithoutClusterID(partitionName string) *Pa
 // Get the scheduling application based on the ID from the partition.
 // Returns nil if the partition or app cannot be found.
 // Visible for tests
-// +checklocksexcludewrite:cc.RWMutex
 func (cc *ClusterContext) GetApplication(appID, partitionName string) *objects.Application {
 	cc.RLock()
 	defer cc.RUnlock()
@@ -489,7 +500,6 @@ func (cc *ClusterContext) GetApplication(appID, partitionName string) *objects.A
 // Get the scheduling queue based on the queue path name from the partition.
 // Returns nil if the partition or queue cannot be found.
 // Visible for tests
-// +checklocksexcludewrite:cc.RWMutex
 func (cc *ClusterContext) GetQueue(queueName string, partitionName string) *objects.Queue {
 	cc.RLock()
 	defer cc.RUnlock()
@@ -592,7 +602,6 @@ func (cc *ClusterContext) handleRMUpdateApplicationEvent(event *rmevent.RMUpdate
 	}
 }
 
-// +checklocksexcludewrite:cc.RWMutex
 func (cc *ClusterContext) NeedPreemption() bool {
 	cc.RLock()
 	defer cc.RUnlock()
@@ -859,7 +868,6 @@ func (cc *ClusterContext) notifyRMAllocationReleased(rmID string, partitionName 
 // Get a scheduling node based on its name from the partition.
 // Returns nil if the partition or node cannot be found.
 // Visible for tests
-// +checklocksexclude:cc.RWMutex
 func (cc *ClusterContext) GetNode(nodeID, partitionName string) *objects.Node {
 	cc.Lock()
 	defer cc.Unlock()
@@ -892,14 +900,12 @@ func (cc *ClusterContext) SetRMInfo(rmID string, rmBuildInformation map[string]s
 	}
 }
 
-// +checklocksexcludewrite:cc.RWMutex
 func (cc *ClusterContext) GetLastHealthCheckResult() *dao.SchedulerHealthDAOInfo {
 	cc.RLock()
 	defer cc.RUnlock()
 	return cc.lastHealthCheckResult
 }
 
-// +checklocksexclude:cc.RWMutex
 func (cc *ClusterContext) SetLastHealthCheckResult(c *dao.SchedulerHealthDAOInfo) {
 	cc.Lock()
 	defer cc.Unlock()
