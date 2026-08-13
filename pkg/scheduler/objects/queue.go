@@ -138,6 +138,11 @@ type Queue struct {
 }
 
 // newBlankQueue creates a new empty queue objects with all values initialised.
+// The queue it returns cannot be reached by anything else yet, which is what lets its callers
+// finish building it without the queue lock. The claim is checked here: publishing the queue
+// anywhere on the way to the return is reported. Registering the lock class does not publish
+// it, that call takes the address of the lock and a lock is no handle on its object.
+// +checklocksreturnsfresh
 func newBlankQueue() *Queue {
 	sq := &Queue{
 		children:                 make(map[string]*Queue),
@@ -176,13 +181,14 @@ func NewConfiguredQueue(conf configs.QueueConfig, parent *Queue, silence bool, a
 	}
 	sq.parent = parent
 	// the queue is still being built and cannot be reached by anything else, so the fields
-	// below are set and the helpers called without holding the queue lock
-	sq.isManaged = true                      // +checklocksignore
-	sq.maxRunningApps = conf.MaxApplications // +checklocksignore
-	sq.updateMaxRunningAppsMetrics()         // +checklocksignore
+	// below are set and the helpers called without holding the queue lock; newBlankQueue
+	// declares that and the analysis checks it holds all the way to addChildQueue
+	sq.isManaged = true
+	sq.maxRunningApps = conf.MaxApplications
+	sq.updateMaxRunningAppsMetrics()
 
 	// update the properties
-	if _, err := sq.applyConf(conf, silence); err != nil { // +checklocksignore
+	if _, err := sq.applyConf(conf, silence); err != nil {
 		return nil, errors.Join(errors.New("configured queue creation failed: "), err)
 	}
 
@@ -190,7 +196,7 @@ func NewConfiguredQueue(conf configs.QueueConfig, parent *Queue, silence bool, a
 	// still need to make sure we lock the parent so we do not interfere with scheduling
 	if parent != nil {
 		// inherit filtered parent properties; sq.properties already holds this queue's config from applyConf
-		sq.mergeProperties(parent.getProperties()) // +checklocksignore
+		sq.mergeProperties(parent.getProperties())
 		sq.UpdateQueueProperties(nil)
 		err := parent.addChildQueue(sq)
 		if err != nil {
@@ -204,6 +210,12 @@ func NewConfiguredQueue(conf configs.QueueConfig, parent *Queue, silence bool, a
 		sq.queueEvents = schedEvt.NewQueueEvents(events.GetEventSystem())
 		log.Log(log.SchedQueue).Info("configured queue added to scheduler",
 			zap.String("queueName", sq.QueuePath))
+		// YUNIKORN-XXXX: this is not construction, it is a read of a published queue.
+		// addChildQueue above put the queue in the parent's map and released the parent lock,
+		// so anything walking the hierarchy reaches it from here on and isManaged is read
+		// without the queue lock. The racing writer is ApplyConf, which takes the write lock
+		// and flips isManaged when a config reload turns a dynamic queue into a managed one.
+		// Fix: read it into a local before the queue is added to the parent.
 		sq.queueEvents.SendNewQueueEvent(sq.QueuePath, sq.isManaged) // +checklocksignore
 	}
 	return sq, nil
@@ -252,8 +264,8 @@ func newDynamicQueueInternal(name string, leaf bool, parent *Queue, appQueueMapp
 	sq.QueuePath = parent.QueuePath + configs.DOT + sq.Name
 	sq.parent = parent
 	// as above: the queue is not reachable yet so no lock is taken
-	sq.isManaged = false // +checklocksignore
-	sq.isLeaf = leaf     // +checklocksignore
+	sq.isManaged = false
+	sq.isLeaf = leaf
 	sq.appQueueMapping = appQueueMapping
 
 	// add to the parent, we might have a partition lock already
@@ -267,6 +279,9 @@ func newDynamicQueueInternal(name string, leaf bool, parent *Queue, appQueueMapp
 	sq.queueEvents = schedEvt.NewQueueEvents(events.GetEventSystem())
 	log.Log(log.SchedQueue).Info("dynamic queue added to scheduler",
 		zap.String("queueName", sq.QueuePath))
+	// YUNIKORN-XXXX: the second of the pair, see NewConfiguredQueue. Past addChildQueue the
+	// queue is in the parent's map with the parent lock released, so this reads isManaged on a
+	// queue the scheduler can already reach.
 	sq.queueEvents.SendNewQueueEvent(sq.QueuePath, sq.isManaged) // +checklocksignore
 
 	return sq, nil
@@ -1236,6 +1251,11 @@ func (sq *Queue) removeChildQueue(name string) {
 
 // addChildQueue add a child queue to this queue.
 // note: both child.isLeaf and child.isManaged must be already configured
+// The child must still be unreachable when it gets here, which is what lets its fields be read
+// and written below without the child lock. That is a contract on the caller now rather than a
+// comment: it is checked at every call site. Inserting the child into this queue's guarded map
+// publishes it as far as the callers are concerned, so nothing here may be repeated by them.
+// +checklocksfresh:child
 func (sq *Queue) addChildQueue(child *Queue) error {
 	sq.Lock()
 	defer sq.Unlock()
@@ -1248,11 +1268,11 @@ func (sq *Queue) addChildQueue(child *Queue) error {
 
 	// no need to lock child as it is a new queue which cannot be accessed yet
 	sq.children[child.Name] = child
-	sq.childPriorities[child.Name] = child.getCurrentPriority() // +checklocksignore
+	sq.childPriorities[child.Name] = child.getCurrentPriority()
 
-	if child.isLeaf { // +checklocksignore
+	if child.isLeaf {
 		// managed (configured) leaf queue can't use template
-		if child.isManaged { // +checklocksignore
+		if child.isManaged {
 			return nil
 		}
 		// try to use template if it is not nil
@@ -1261,13 +1281,13 @@ func (sq *Queue) addChildQueue(child *Queue) error {
 				zap.String("child queue", child.QueuePath),
 				zap.String("parent queue", sq.QueuePath),
 				zap.Any("template", sq.template))
-			child.applyTemplate(sq.template) // +checklocksignore
+			child.applyTemplate(sq.template)
 		}
 		return nil
 	}
 	// don't override the template of non-leaf queue
-	if child.template == nil { // +checklocksignore
-		child.template = sq.template // +checklocksignore
+	if child.template == nil {
+		child.template = sq.template
 		log.Log(log.SchedQueue).Debug("new parent queue inheriting template from parent queue",
 			zap.String("child queue", child.QueuePath),
 			zap.String("parent queue", sq.QueuePath))

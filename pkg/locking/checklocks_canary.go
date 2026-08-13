@@ -45,9 +45,12 @@ import "strconv"
 // and leaves the others green, which is exactly what this file exists to catch.
 //
 //	checklocks    a guarded field accessed without the lock, a call to a method that must
-//	              not be called with the lock held, and a lock taken twice on one path: the
-//	              second is the only machine check we have on the self deadlock rules and
-//	              the third only holds while the wrapper types declare themselves locks
+//	              not be called with the lock held, a lock taken twice on one path, and the
+//	              same self deadlock reached from inside a callback whose lock is named by
+//	              the value its body asserts: the second is the only machine check we have
+//	              on the self deadlock rules, the third only holds while the wrapper types
+//	              declare themselves locks, and the fourth only while a guard can name an
+//	              asserted value, which is what the fsm callbacks are annotated with
 //	lockstringer  a String method reading a guarded field, which races whatever fmt or zap
 //	              was formatting it under
 //	lockorder     an acquisition that takes the classes in the order the declaration
@@ -119,6 +122,51 @@ func (c *canary) doubleLock(value int) {
 	defer c.mu.Unlock()
 	c.mu.Lock()
 	c.value = value
+}
+
+// callbackCanary is the subject of the callback fixture below. Its guarded field is named
+// apart from the one above so that a diagnostic about it can only have come from there.
+type callbackCanary struct {
+	// +checklocks:mu
+	callbackValue int
+	mu            RWMutex
+}
+
+// callbackSelfLocking takes the subject's own lock, so holding it on entry would deadlock.
+// +checklocksexclude:c.mu
+func (c *callbackCanary) callbackSelfLocking(value int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.callbackValue = value
+}
+
+// callbackEvent stands in for what a state machine library hands a callback: the subject
+// arrives inside an interface and the body recovers it by asserting a type.
+type callbackEvent struct {
+	Args []any
+}
+
+// callbackTable is the shape the fsm callbacks in this code base have: a table of literals
+// handed to a library, each stating the lock its caller holds by naming the value its own
+// body recovers, because that value exists nowhere else to be named.
+//
+// Both polarities are in the one literal. The write through the asserted subject is correct
+// and must never be reported, and the call below it must be, because the guard put that
+// subject's lock in scope and the callee takes it again.
+//
+// The second of those is what the make target requires, and it is the only message here that
+// a guard which stopped binding would take with it: a guard matching nothing records no lock,
+// silently, and then the call is fine while the write is reported instead. Requiring the
+// report on the WRITE would pass in both worlds and prove nothing.
+func callbackTable() map[string]func(*callbackEvent) {
+	return map[string]func(*callbackEvent){
+		// +checklocks:event.Args[0].(*callbackCanary).mu
+		"enter": func(event *callbackEvent) {
+			subject := event.Args[0].(*callbackCanary)
+			subject.callbackValue = 1
+			subject.callbackSelfLocking(2)
+		},
+	}
 }
 
 // canaryOuter and canaryInner carry the two classes of the edge declared at the top of this

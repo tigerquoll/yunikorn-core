@@ -91,8 +91,9 @@ func NewClusterContext(rmID, policyGroup string, config []byte) (*ClusterContext
 	if cc.reservationDisabled {
 		objects.SetReservationDelay(math.MaxInt64)
 	}
-	// the cluster context is still being built and cannot be reached yet, no lock is taken
-	err = cc.updateSchedulerConfig(conf, rmID) // +checklocksignore
+	// the cluster context is still being built and cannot be reached yet, no lock is taken:
+	// the analysis follows that from the literal above rather than being told to ignore it
+	err = cc.updateSchedulerConfig(conf, rmID)
 	if err != nil {
 		return nil, err
 	}
