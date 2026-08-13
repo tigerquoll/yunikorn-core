@@ -39,33 +39,31 @@ const (
 )
 
 // +lockclass:Node
+// +checklocksguardedby:RWMutex
 type Node struct {
 	// Fields for fast access These fields are considered read only.
 	// Values should only be set when creating a new node and never changed.
-	NodeID    string
-	Hostname  string
-	Rackname  string
+	// +checklocksunguarded
+	NodeID string
+	// +checklocksunguarded
+	Hostname string
+	// +checklocksunguarded
+	Rackname string
+	// +checklocksunguarded
 	Partition string
 
-	// Private fields need protection
-	attributes map[string]string
-	// +checklocks:RWMutex
-	totalResource *resources.Resource
-	// +checklocks:RWMutex
-	occupiedResource *resources.Resource
-	// +checklocks:RWMutex
+	// +checklocksunguarded
+	attributes        map[string]string
+	totalResource     *resources.Resource
+	occupiedResource  *resources.Resource
 	allocatedResource *resources.Resource
-	// +checklocks:RWMutex
 	availableResource *resources.Resource
-	// +checklocks:RWMutex
-	allocations map[string]*Allocation
-	// +checklocks:RWMutex
-	schedulable bool
+	allocations       map[string]*Allocation
+	schedulable       bool
 
-	// +checklocks:RWMutex
 	reservations map[string]*reservation // a map of reservations
-	// +checklocks:RWMutex
-	listeners  []NodeListener // a list of node listeners
+	listeners    []NodeListener          // a list of node listeners
+	// +checklocksunguarded
 	nodeEvents *schedEvt.NodeEvents
 
 	locking.RWMutex
@@ -155,7 +153,6 @@ func (sn *Node) GetInstanceType() string {
 // GetReservationKeys Return an array of all reservation keys for the node.
 // This will return an empty array if there are no reservations.
 // Visible for tests
-// +checklocksexcludewrite:sn.RWMutex
 func (sn *Node) GetReservationKeys() []string {
 	sn.RLock()
 	defer sn.RUnlock()
@@ -166,7 +163,6 @@ func (sn *Node) GetReservationKeys() []string {
 	return keys
 }
 
-// +checklocksexcludewrite:sn.RWMutex
 func (sn *Node) GetCapacity() *resources.Resource {
 	sn.RLock()
 	defer sn.RUnlock()
@@ -175,6 +171,7 @@ func (sn *Node) GetCapacity() *resources.Resource {
 
 // SetCapacity changes the node resource capacity and returns the resource delta.
 // The delta is positive for an increased capacity and negative for a decrease.
+// Stated, not derived: a closure captures the receiver, hiding the acquisition from the derivation.
 // +checklocksexclude:sn.RWMutex
 func (sn *Node) SetCapacity(newCapacity *resources.Resource) *resources.Resource {
 	var delta *resources.Resource
@@ -197,14 +194,12 @@ func (sn *Node) SetCapacity(newCapacity *resources.Resource) *resources.Resource
 	return delta
 }
 
-// +checklocksexcludewrite:sn.RWMutex
 func (sn *Node) GetOccupiedResource() *resources.Resource {
 	sn.RLock()
 	defer sn.RUnlock()
 	return sn.occupiedResource.Clone()
 }
 
-// +checklocksexclude:sn.RWMutex
 func (sn *Node) UpdateAllocatedResource(delta *resources.Resource) {
 	sn.Lock()
 	defer sn.Unlock()
@@ -213,7 +208,6 @@ func (sn *Node) UpdateAllocatedResource(delta *resources.Resource) {
 	sn.refreshAvailableResource()
 }
 
-// +checklocksexclude:sn.RWMutex
 func (sn *Node) SetOccupiedResource(occupiedResource *resources.Resource) {
 	defer sn.notifyListeners()
 	sn.Lock()
@@ -247,7 +241,6 @@ func (sn *Node) refreshAvailableResource() {
 
 // Return the allocation based on the allocationKey of the allocation.
 // returns nil if the allocation is not found
-// +checklocksexcludewrite:sn.RWMutex
 func (sn *Node) GetAllocation(allocationKey string) *Allocation {
 	sn.RLock()
 	defer sn.RUnlock()
@@ -256,7 +249,6 @@ func (sn *Node) GetAllocation(allocationKey string) *Allocation {
 }
 
 // GetYunikornAllocations returns a copy of Yunikorn allocations on this node
-// +checklocksexcludewrite:sn.RWMutex
 func (sn *Node) GetYunikornAllocations() []*Allocation {
 	sn.RLock()
 	defer sn.RUnlock()
@@ -264,7 +256,6 @@ func (sn *Node) GetYunikornAllocations() []*Allocation {
 }
 
 // GetForeignAllocations returns a copy of non-Yunikorn allocations on this node
-// +checklocksexcludewrite:sn.RWMutex
 func (sn *Node) GetForeignAllocations() []*Allocation {
 	sn.RLock()
 	defer sn.RUnlock()
@@ -286,7 +277,6 @@ func (sn *Node) getAllocations(foreign bool) []*Allocation {
 // Set the node to unschedulable.
 // This will cause the node to be skipped during the scheduling cycle.
 // Visible for testing only
-// +checklocksexclude:sn.RWMutex
 func (sn *Node) SetSchedulable(schedulable bool) {
 	defer sn.notifyListeners()
 	sn.Lock()
@@ -296,7 +286,6 @@ func (sn *Node) SetSchedulable(schedulable bool) {
 }
 
 // Can this node be used in scheduling.
-// +checklocksexcludewrite:sn.RWMutex
 func (sn *Node) IsSchedulable() bool {
 	sn.RLock()
 	defer sn.RUnlock()
@@ -304,7 +293,6 @@ func (sn *Node) IsSchedulable() bool {
 }
 
 // Get the allocated resource on this node.
-// +checklocksexcludewrite:sn.RWMutex
 func (sn *Node) GetAllocatedResource() *resources.Resource {
 	sn.RLock()
 	defer sn.RUnlock()
@@ -312,7 +300,6 @@ func (sn *Node) GetAllocatedResource() *resources.Resource {
 }
 
 // Get the available resource on this node.
-// +checklocksexcludewrite:sn.RWMutex
 func (sn *Node) GetAvailableResource() *resources.Resource {
 	sn.RLock()
 	defer sn.RUnlock()
@@ -321,7 +308,6 @@ func (sn *Node) GetAvailableResource() *resources.Resource {
 
 // GetFitInScoreForAvailableResource calculates a fit in score for "res" based on the current
 // available resources, avoiding cloning. The caller must ensure that "res" cannot change while this method is running.
-// +checklocksexcludewrite:sn.RWMutex
 func (sn *Node) GetFitInScoreForAvailableResource(res *resources.Resource) float64 {
 	sn.RLock()
 	defer sn.RUnlock()
@@ -346,7 +332,6 @@ func (sn *Node) GetUtilizedResource() *resources.Resource {
 // All resources types requested must match the resource types provided by the nodes.
 // A request may ask for only a subset of the types, but the node must provide at least the
 // resource types requested in a larger or equal quantity as requested.
-// +checklocksexcludewrite:sn.RWMutex
 func (sn *Node) FitInNode(resRequest *resources.Resource) bool {
 	sn.RLock()
 	defer sn.RUnlock()
@@ -357,6 +342,7 @@ func (sn *Node) FitInNode(resRequest *resources.Resource) bool {
 // Returns nil if the allocation was not found and no changes are made. If the allocation
 // is found the Allocation removed is returned. Used resources will decrease available
 // will increase as per the allocation removed.
+// Stated, not derived: a closure captures the receiver, hiding the acquisition from the derivation.
 // +checklocksexclude:sn.RWMutex
 func (sn *Node) RemoveAllocation(allocationKey string) *Allocation {
 	var alloc *Allocation
@@ -406,7 +392,6 @@ func (sn *Node) AddAllocation(alloc *Allocation) {
 }
 
 // UpdateForeignAllocation updates a foreign allocation and re-calculates the available/occupied resources
-// +checklocksexclude:sn.RWMutex
 func (sn *Node) UpdateForeignAllocation(alloc *Allocation) *Allocation {
 	sn.Lock()
 	defer sn.Unlock()
@@ -478,7 +463,6 @@ func (sn *Node) addAllocationInternal(alloc *Allocation, force bool) bool {
 // ReplaceAllocation replaces the placeholder with the real allocation on the node.
 // The delta passed in is the difference in resource usage between placeholder and real allocation.
 // It should always be a negative value or zero: it is a decrease in usage or no change
-// +checklocksexclude:sn.RWMutex
 func (sn *Node) ReplaceAllocation(allocationKey string, replace *Allocation, delta *resources.Resource) {
 	defer sn.notifyListeners()
 	sn.Lock()
@@ -509,7 +493,6 @@ func (sn *Node) ReplaceAllocation(allocationKey string, replace *Allocation, del
 
 // CanAllocate checks if the proposed allocation fits in the available resources.
 // If the proposed allocation does not fit false is returned.
-// +checklocksexcludewrite:sn.RWMutex
 func (sn *Node) CanAllocate(res *resources.Resource) bool {
 	sn.RLock()
 	defer sn.RUnlock()
@@ -583,7 +566,6 @@ func (sn *Node) preAllocateCheck(res *resources.Resource, allocationKey string) 
 }
 
 // IsReserved returns true if the node has been reserved for an allocation
-// +checklocksexcludewrite:sn.RWMutex
 func (sn *Node) IsReserved() bool {
 	sn.RLock()
 	defer sn.RUnlock()
@@ -605,7 +587,6 @@ func (sn *Node) isReservedForAllocation(key string) bool {
 // Reserve the node for this application and alloc combination.
 // The reservation is checked against the node resources.
 // If the reservation fails the function returns an error, if the reservation is made it returns nil.
-// +checklocksexclude:sn.RWMutex
 func (sn *Node) Reserve(app *Application, ask *Allocation) error {
 	sn.Lock()
 	defer sn.Unlock()
@@ -679,7 +660,6 @@ func (sn *Node) unReserve(alloc *Allocation) int {
 }
 
 // GetReservations returns all reservation made on this node
-// +checklocksexclude:sn.RWMutex
 func (sn *Node) GetReservations() []*reservation {
 	sn.Lock()
 	defer sn.Unlock()
@@ -693,7 +673,6 @@ func (sn *Node) GetReservations() []*reservation {
 }
 
 // GetResourceUsageShares gets a map of name -> resource usages per type in shares (0 to 1). Can return NaN.
-// +checklocksexcludewrite:sn.RWMutex
 func (sn *Node) GetResourceUsageShares() map[string]float64 {
 	sn.RLock()
 	defer sn.RUnlock()
@@ -708,14 +687,12 @@ func (sn *Node) GetResourceUsageShares() map[string]float64 {
 	return res
 }
 
-// +checklocksexclude:sn.RWMutex
 func (sn *Node) AddListener(listener NodeListener) {
 	sn.Lock()
 	defer sn.Unlock()
 	sn.listeners = append(sn.listeners, listener)
 }
 
-// +checklocksexclude:sn.RWMutex
 func (sn *Node) RemoveListener(listener NodeListener) {
 	sn.Lock()
 	defer sn.Unlock()
@@ -731,6 +708,7 @@ func (sn *Node) RemoveListener(listener NodeListener) {
 }
 
 // Notifies listeners of changes to this node. This method must not be called while locks are held.
+// The body only reads the lock, so the derivation would exclude a writer alone: keep the wider rule.
 // +checklocksexclude:sn.RWMutex
 func (sn *Node) notifyListeners() {
 	for _, listener := range sn.getListeners() {
@@ -746,7 +724,6 @@ func (sn *Node) getListeners() []NodeListener {
 	return list
 }
 
-// +checklocksexcludewrite:sn.RWMutex
 func (sn *Node) SendNodeAddedEvent() {
 	sn.RLock()
 	defer sn.RUnlock()

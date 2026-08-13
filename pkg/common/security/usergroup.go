@@ -112,7 +112,6 @@ func GetUserGroupCache(ugr configs.UserGroupResolver, ldapConfigReader ConfigRea
 }
 
 // GetResolverType returns the type of resolver configured
-// +checklocksexcludewrite:c.lock
 func (c *UserGroupCache) GetResolverType() string {
 	c.lock.RLock()
 	defer c.lock.RUnlock()
@@ -166,7 +165,6 @@ func (c *UserGroupCache) resetCache() {
 	c.ugs = make(map[string]*UserGroup) // +checklocksignore
 }
 
-// +checklocksexclude:c.lock
 func (c *UserGroupCache) ConvertUGI(ugi *si.UserGroupInformation, force bool) (UserGroup, error) {
 	// check if we have a user to convert
 	if ugi == nil || ugi.User == "" {
@@ -212,7 +210,6 @@ func (c *UserGroupCache) ConvertUGI(ugi *si.UserGroupInformation, force bool) (U
 // is configured against. The declaration is what says so.
 //
 // +blocking
-// +checklocksexclude:c.lock
 func (c *UserGroupCache) GetUserGroup(userName string) (UserGroup, error) {
 	// check if we have a user to resolve
 	if userName == "" {
@@ -268,7 +265,6 @@ func (c *UserGroupCache) GetUserGroup(userName string) (UserGroup, error) {
 }
 
 // Stop the currently running cache cleaner and reset the resolver.
-// +checklocksexclude:c.lock
 func (c *UserGroupCache) Stop() {
 	// make sure that in case of multiple partitions, we call Stop() only once (the instance is shared)
 	// see ClusterContext.Stop()

@@ -25,7 +25,7 @@ go 1.25.0
 // gvisor analyser with three fixes that are still pending upstream, without which the annotations
 // in this repository either panic the tool or are silently dropped. The module is a temporary home
 // until a permanent one is sorted out.
-require github.com/tigerquoll/checklocks v0.4.0
+require github.com/tigerquoll/checklocks v0.5.0
 
 require (
 	golang.org/x/mod v0.34.0 // indirect

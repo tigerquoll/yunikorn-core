@@ -27,14 +27,12 @@ import (
 // This class collects basic information about the cluster
 // for the web UI's front page.
 // For more detailed metrics collection use Prometheus.
+// +checklocksguardedby:RWMutex
 type InternalMetricsHistory struct {
-	// +checklocks:RWMutex
 	records []*MetricsRecord
-	// +checklocks:RWMutex
-	limit int
+	limit   int
 
 	// internal implementation of limited array
-	// +checklocks:RWMutex
 	pointer int
 
 	locking.RWMutex
@@ -53,7 +51,6 @@ func NewInternalMetricsHistory(limit int) *InternalMetricsHistory {
 	}
 }
 
-// +checklocksexclude:h.RWMutex
 func (h *InternalMetricsHistory) Store(totalApplications, totalContainers int) {
 	h.Lock()
 	defer h.Unlock()
@@ -71,7 +68,6 @@ func (h *InternalMetricsHistory) Store(totalApplications, totalContainers int) {
 
 // contract: the non-nil values are ordered by the time of addition
 // may contains nil values, those should be handled (filtered) on the caller's side
-// +checklocksexcludewrite:h.RWMutex
 func (h *InternalMetricsHistory) GetRecords() []*MetricsRecord {
 	h.RLock()
 	defer h.RUnlock()
@@ -82,7 +78,6 @@ func (h *InternalMetricsHistory) GetRecords() []*MetricsRecord {
 	return returnRecords
 }
 
-// +checklocksexcludewrite:h.RWMutex
 func (h *InternalMetricsHistory) GetLimit() int {
 	h.RLock()
 	defer h.RUnlock()

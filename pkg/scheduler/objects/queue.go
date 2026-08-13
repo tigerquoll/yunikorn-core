@@ -50,89 +50,63 @@ var (
 
 // Queue structure inside Scheduler
 // +lockclass:Queue
+// +checklocksguardedby:RWMutex
 type Queue struct {
+	// +checklocksunguarded
 	QueuePath string // Fully qualified path for the queue
-	Name      string // Queue name as in the config etc.
+	// +checklocksunguarded
+	Name string // Queue name as in the config etc.
 
-	// Private fields need protection
-	// +checklocks:RWMutex
-	sortType policies.SortPolicy // How applications (leaf) or queues (parents) are sorted
-	// +checklocks:RWMutex
-	children map[string]*Queue // Only for direct children, parent queue only
-	// +checklocks:RWMutex
-	childPriorities map[string]int32 // cached priorities for child queues
-	// +checklocks:RWMutex
-	applications map[string]*Application // only for leaf queue
-	// +checklocks:RWMutex
-	appPriorities map[string]int32 // cached priorities for application
-	// +checklocks:RWMutex
-	reservedApps map[string]int // applications reserved within this queue, with reservation count
+	sortType        policies.SortPolicy     // How applications (leaf) or queues (parents) are sorted
+	children        map[string]*Queue       // Only for direct children, parent queue only
+	childPriorities map[string]int32        // cached priorities for child queues
+	applications    map[string]*Application // only for leaf queue
+	appPriorities   map[string]int32        // cached priorities for application
+	reservedApps    map[string]int          // applications reserved within this queue, with reservation count
 	// link back to the parent in the scheduler, set on creation and never changed:
 	// read without the lock on purpose, see the parent first idiom in the queue locking rules
-	parent *Queue
-	// +checklocks:RWMutex
-	pending *resources.Resource // pending resource for the apps in the queue
-	// +checklocks:RWMutex
-	allocatedResource *resources.Resource // allocated resource for the apps in the queue
-	// +checklocks:RWMutex
-	preemptingResource *resources.Resource // preempting resource for the apps in the queue
-	// +checklocks:RWMutex
-	prioritySortEnabled bool // whether priority is used for request sorting
-	// +checklocks:RWMutex
-	priorityPolicy policies.PriorityPolicy // priority policy
-	// +checklocks:RWMutex
-	priorityOffset int32 // priority offset for this queue relative to others
-	// +checklocks:RWMutex
-	preemptionPolicy policies.PreemptionPolicy // preemption policy
-	// +checklocks:RWMutex
-	preemptionDelay time.Duration // time delay before preemption is considered
-	// +checklocks:RWMutex
-	quotaPreemptionDelay time.Duration // time delay before quota preemption is considered
-	// +checklocks:RWMutex
-	currentPriority int32 // the current scheduling priority of this queue
+	// +checklocksunguarded
+	parent               *Queue
+	pending              *resources.Resource       // pending resource for the apps in the queue
+	allocatedResource    *resources.Resource       // allocated resource for the apps in the queue
+	preemptingResource   *resources.Resource       // preempting resource for the apps in the queue
+	prioritySortEnabled  bool                      // whether priority is used for request sorting
+	priorityPolicy       policies.PriorityPolicy   // priority policy
+	priorityOffset       int32                     // priority offset for this queue relative to others
+	preemptionPolicy     policies.PreemptionPolicy // preemption policy
+	preemptionDelay      time.Duration             // time delay before preemption is considered
+	quotaPreemptionDelay time.Duration             // time delay before quota preemption is considered
+	currentPriority      int32                     // the current scheduling priority of this queue
 
 	// The queue properties should be treated as immutable the value is a merge of the
 	// parent properties with the config for this queue only manipulated during creation
 	// of the queue or via a queue configuration update.
-	// +checklocks:RWMutex
-	properties map[string]string
-	// +checklocks:RWMutex
-	adminACL security.ACL // admin ACL
-	// +checklocks:RWMutex
-	submitACL security.ACL // submit ACL
-	// +checklocks:RWMutex
-	maxResource *resources.Resource // When not set, max = nil
-	// +checklocks:RWMutex
+	properties         map[string]string
+	adminACL           security.ACL        // admin ACL
+	submitACL          security.ACL        // submit ACL
+	maxResource        *resources.Resource // When not set, max = nil
 	guaranteedResource *resources.Resource // When not set, Guaranteed == 0
-	// +checklocks:RWMutex
-	isLeaf bool // this is a leaf queue or not (i.e. parent)
-	// +checklocks:RWMutex
-	isManaged bool // queue is part of the config, not auto created
+	isLeaf             bool                // this is a leaf queue or not (i.e. parent)
+	isManaged          bool                // queue is part of the config, not auto created
 	// the state of the queue for scheduling, set on creation and never replaced, the
 	// state machine has its own locking
-	stateMachine *fsm.FSM
-	// +checklocks:RWMutex
-	stateTime time.Time // last time the state was updated (needed for cleanup)
-	// +checklocks:RWMutex
-	maxRunningApps uint64
-	// +checklocks:RWMutex
-	runningApps uint64
-	// +checklocks:RWMutex
+	// +checklocksunguarded
+	stateMachine           *fsm.FSM
+	stateTime              time.Time // last time the state was updated (needed for cleanup)
+	maxRunningApps         uint64
+	runningApps            uint64
 	allocatingAcceptedApps map[string]bool
-	// +checklocks:RWMutex
-	template *template.Template
+	template               *template.Template
 	// set on creation and never changed, no lock needed
+	// +checklocksunguarded
 	queueEvents *schedEvt.QueueEvents
 	// appID mapping to queues, set on creation and never changed, no lock needed
-	appQueueMapping *AppQueueMapping
-	// +checklocks:RWMutex
+	// +checklocksunguarded
+	appQueueMapping          *AppQueueMapping
 	quotaPreemptionStartTime time.Time
-	// +checklocks:RWMutex
 	isQuotaPreemptionRunning bool
-	// +checklocks:RWMutex
-	unschedAskBackoff uint64
-	// +checklocks:RWMutex
-	askBackoffDelay time.Duration
+	unschedAskBackoff        uint64
+	askBackoffDelay          time.Duration
 
 	locking.RWMutex
 }
@@ -326,7 +300,6 @@ func (sq *Queue) GetProperties() map[string]string {
 // Config properties already set on the queue (from ApplyConf) override parent properties.
 // This should be called after ApplyConf during config reload to re-apply inherited properties
 // from the parent. Lock protected.
-// +checklocksexclude:sq.RWMutex
 func (sq *Queue) MergeParentProperties() {
 	// get parent properties outside of the lock to avoid potential deadlocks with parent queue lock
 	parentProps := sq.parent.getProperties()
@@ -408,7 +381,6 @@ func unschedulableAskBackoff(value string) (uint64, error) {
 }
 
 // ApplyConf is the locked version of applyConf
-// +checklocksexclude:sq.RWMutex
 func (sq *Queue) ApplyConf(conf configs.QueueConfig) (*resources.Resource, error) {
 	sq.Lock()
 	defer sq.Unlock()
@@ -584,7 +556,6 @@ func (sq *Queue) setPreemptionTime(oldMaxResource *resources.Resource, oldDelay 
 
 // ResetPreemptionTime reset the quota preemption variables
 // Only for testing
-// +checklocksexclude:sq.RWMutex
 func (sq *Queue) ResetPreemptionTime() {
 	sq.Lock()
 	defer sq.Unlock()
@@ -714,7 +685,6 @@ func (sq *Queue) setResources(guaranteedResource, maxResource *resources.Resourc
 	}
 }
 
-// +checklocksexclude:sq.RWMutex
 func (sq *Queue) SetResources(guaranteedResource, maxResource *resources.Resource) {
 	sq.Lock()
 	defer sq.Unlock()
@@ -722,7 +692,6 @@ func (sq *Queue) SetResources(guaranteedResource, maxResource *resources.Resourc
 }
 
 // SetMaxRunningApps allows setting the maximum running apps on a queue
-// +checklocksexclude:sq.RWMutex
 func (sq *Queue) SetMaxRunningApps(maxApps uint64) {
 	if sq == nil {
 		return
@@ -764,7 +733,6 @@ func (sq *Queue) resetProperties() {
 }
 
 // UpdateQueueProperties updates the queue properties defined as text
-// +checklocksexclude:sq.RWMutex
 func (sq *Queue) UpdateQueueProperties(oldMaxResource *resources.Resource) {
 	sq.Lock()
 	defer sq.Unlock()
@@ -852,7 +820,6 @@ func (sq *Queue) UpdateQueueProperties(oldMaxResource *resources.Resource) {
 }
 
 // GetQueuePath returns the fully qualified path of this queue.
-// +checklocksexcludewrite:sq.RWMutex
 func (sq *Queue) GetQueuePath() string {
 	sq.RLock()
 	defer sq.RUnlock()
@@ -900,7 +867,6 @@ func (sq *Queue) handleQueueEvent(event ObjectEvent) error {
 }
 
 // GetAllocatedResource returns a clone of the allocated resources for this queue.
-// +checklocksexcludewrite:sq.RWMutex
 func (sq *Queue) GetAllocatedResource() *resources.Resource {
 	sq.RLock()
 	defer sq.RUnlock()
@@ -908,7 +874,6 @@ func (sq *Queue) GetAllocatedResource() *resources.Resource {
 }
 
 // GetPreemptingResource returns a clone of the preempting resources for this queue.
-// +checklocksexcludewrite:sq.RWMutex
 func (sq *Queue) GetPreemptingResource() *resources.Resource {
 	sq.RLock()
 	defer sq.RUnlock()
@@ -916,7 +881,6 @@ func (sq *Queue) GetPreemptingResource() *resources.Resource {
 }
 
 // GetGuaranteedResource returns a clone of the guaranteed resource for the queue.
-// +checklocksexcludewrite:sq.RWMutex
 func (sq *Queue) GetGuaranteedResource() *resources.Resource {
 	sq.RLock()
 	defer sq.RUnlock()
@@ -924,7 +888,6 @@ func (sq *Queue) GetGuaranteedResource() *resources.Resource {
 }
 
 // GetMaxApps returns the maximum number of applications that can run in this queue.
-// +checklocksexcludewrite:sq.RWMutex
 func (sq *Queue) GetMaxApps() uint64 {
 	sq.RLock()
 	defer sq.RUnlock()
@@ -932,7 +895,6 @@ func (sq *Queue) GetMaxApps() uint64 {
 }
 
 // GetActualGuaranteedResource returns the actual (including parent) guaranteed resources for the queue.
-// +checklocksexcludewrite:sq.RWMutex
 func (sq *Queue) GetActualGuaranteedResource() *resources.Resource {
 	if sq == nil {
 		return resources.NewResource()
@@ -945,7 +907,6 @@ func (sq *Queue) GetActualGuaranteedResource() *resources.Resource {
 
 // GetPreemptableResource returns the actual (including parent) preemptable resources for the queue.
 // Preemptable resource is nothing but the resources used above the guaranteed quota.
-// +checklocksexcludewrite:sq.RWMutex
 func (sq *Queue) GetPreemptableResource() *resources.Resource {
 	if sq == nil {
 		return resources.NewResource()
@@ -963,7 +924,6 @@ func (sq *Queue) GetPreemptableResource() *resources.Resource {
 	return resources.ComponentWiseMin(preemptable, parentPreemptable)
 }
 
-// +checklocksexcludewrite:sq.RWMutex
 func (sq *Queue) GetPreemptionDelay() time.Duration {
 	sq.RLock()
 	defer sq.RUnlock()
@@ -973,7 +933,6 @@ func (sq *Queue) GetPreemptionDelay() time.Duration {
 // CheckSubmitAccess checks if the user has access to the queue to submit an application.
 // The check is performed recursively: i.e. access to the parent allows access to this queue.
 // This will check both submitACL and adminACL.
-// +checklocksexcludewrite:sq.RWMutex
 func (sq *Queue) CheckSubmitAccess(user security.UserGroup) bool {
 	if common.IsRecoveryQueue(sq.QueuePath) {
 		// recovery queue can never pass ACL checks
@@ -990,7 +949,6 @@ func (sq *Queue) CheckSubmitAccess(user security.UserGroup) bool {
 
 // CheckAdminAccess checks if the user has access to the queue to perform administrative actions.
 // The check is performed recursively: i.e. access to the parent allows access to this queue.
-// +checklocksexcludewrite:sq.RWMutex
 func (sq *Queue) CheckAdminAccess(user security.UserGroup) bool {
 	sq.RLock()
 	allow := sq.adminACL.CheckAccess(user)
@@ -1003,7 +961,6 @@ func (sq *Queue) CheckAdminAccess(user security.UserGroup) bool {
 
 // GetPartitionQueueDAOInfo returns the queue hierarchy as an object for a REST call.
 // Include is false, which means that returns the specified queue object, but does not return the children of the specified queue.
-// +checklocksexcludewrite:sq.RWMutex
 func (sq *Queue) GetPartitionQueueDAOInfo(include bool) dao.PartitionQueueDAOInfo {
 	queueInfo := dao.PartitionQueueDAOInfo{}
 	children := sq.GetCopyOfChildren()
@@ -1068,7 +1025,6 @@ func (sq *Queue) GetPartitionQueueDAOInfo(include bool) dao.PartitionQueueDAOInf
 }
 
 // GetPendingResource returns the pending resources for this queue.
-// +checklocksexcludewrite:sq.RWMutex
 func (sq *Queue) GetPendingResource() *resources.Resource {
 	sq.RLock()
 	defer sq.RUnlock()
@@ -1119,7 +1075,6 @@ func (sq *Queue) decPendingResource(delta *resources.Resource) {
 // AddApplication adds the application to the queue. All checks are assumed to have passed before we get here.
 // No update of pending resource is needed as it should not have any requests yet.
 // Replaces the existing application without further checks.
-// +checklocksexclude:sq.RWMutex
 func (sq *Queue) AddApplication(app *Application) {
 	sq.Lock()
 	defer sq.Unlock()
@@ -1131,7 +1086,6 @@ func (sq *Queue) AddApplication(app *Application) {
 // RemoveApplication removes the app from the list of tracked applications. Make sure that the app
 // is assigned to this queue and not removed yet.
 // If not found this call is a noop
-// +checklocksexclude:sq.RWMutex
 func (sq *Queue) RemoveApplication(app *Application) {
 	// clean up any outstanding pending resources
 	appID := app.ApplicationID
@@ -1196,7 +1150,6 @@ func (sq *Queue) appExists(appID string) bool {
 }
 
 // GetCopyOfApps gets a shallow copy of all non-completed apps holding the lock
-// +checklocksexcludewrite:sq.RWMutex
 func (sq *Queue) GetCopyOfApps() map[string]*Application {
 	sq.RLock()
 	defer sq.RUnlock()
@@ -1211,7 +1164,6 @@ func (sq *Queue) GetCopyOfApps() map[string]*Application {
 // This is used by the partition manager to find all queues to clean however we can not
 // guarantee that there is no new child added while we clean up since there is no overall
 // lock on the scheduler. We'll need to test just before to make sure the parent is empty
-// +checklocksexcludewrite:sq.RWMutex
 func (sq *Queue) GetCopyOfChildren() map[string]*Queue {
 	sq.RLock()
 	defer sq.RUnlock()
@@ -1225,7 +1177,6 @@ func (sq *Queue) GetCopyOfChildren() map[string]*Queue {
 // IsEmpty returns true if a queue is empty based on the following definition:
 // A parent queue is empty when it has no children left
 // A leaf queue is empty when there are no applications left
-// +checklocksexcludewrite:sq.RWMutex
 func (sq *Queue) IsEmpty() bool {
 	sq.RLock()
 	defer sq.RUnlock()
@@ -1329,7 +1280,6 @@ func (sq *Queue) doRemoveQueue() {
 }
 
 // GetChildQueue returns a queue if the name exists in the child map as a key.
-// +checklocksexcludewrite:sq.RWMutex
 func (sq *Queue) GetChildQueue(name string) *Queue {
 	sq.RLock()
 	defer sq.RUnlock()
@@ -1341,7 +1291,6 @@ func (sq *Queue) GetChildQueue(name string) *Queue {
 // Since nothing is allocated there shouldn't be anything referencing this queue anymore.
 // The real removal is the removal of the queue from the parent's child list.
 // Use a read lock on this queue to prevent other changes but allow status checks etc.
-// +checklocksexcludewrite:sq.RWMutex
 func (sq *Queue) RemoveQueue() bool {
 	sq.RLock()
 	defer sq.RUnlock()
@@ -1362,7 +1311,6 @@ func (sq *Queue) RemoveQueue() bool {
 }
 
 // IsLeafQueue returns true is the queue a leaf. Returns false for a parent queue.
-// +checklocksexcludewrite:sq.RWMutex
 func (sq *Queue) IsLeafQueue() bool {
 	sq.RLock()
 	defer sq.RUnlock()
@@ -1370,7 +1318,6 @@ func (sq *Queue) IsLeafQueue() bool {
 }
 
 // IsManaged returns true for a managed queue. Returns false for a dynamic queue.
-// +checklocksexcludewrite:sq.RWMutex
 func (sq *Queue) IsManaged() bool {
 	sq.RLock()
 	defer sq.RUnlock()
@@ -1384,7 +1331,6 @@ func (sq *Queue) isRoot() bool {
 
 // TryIncAllocatedResource increments the allocated resources for this queue (recursively).
 // Guard against going over max resources if set
-// +checklocksexclude:sq.RWMutex
 func (sq *Queue) TryIncAllocatedResource(alloc *resources.Resource) error {
 	// check this queue: failure stops checks if the allocation is not part of a node addition
 	// YUNIKORN-XXXX: the guarded fields below are read for the error and log messages without
@@ -1423,7 +1369,6 @@ func (sq *Queue) TryIncAllocatedResource(alloc *resources.Resource) error {
 // IncAllocatedResource increments the allocated resources for this queue (recursively). No queue limits are checked.
 // In case any quota preemption already scheduled or any quota preemption delay is configured, set the same delay again
 // so that any usage overflow over the max quota caused by alloc would be brought down when the delay expires.
-// +checklocksexclude:sq.RWMutex
 func (sq *Queue) IncAllocatedResource(alloc *resources.Resource, isQuotaPreemptionEnabled bool) {
 	// fall through if nil
 	if sq == nil {
@@ -1474,7 +1419,6 @@ func (sq *Queue) allocatedResFits(alloc *resources.Resource) bool {
 
 // DecAllocatedResource decrement the allocated resources for this queue (recursively)
 // Guard against going below zero resources.
-// +checklocksexclude:sq.RWMutex
 func (sq *Queue) DecAllocatedResource(alloc *resources.Resource) error {
 	if sq == nil {
 		return fmt.Errorf("queue is nil")
@@ -1527,7 +1471,6 @@ func (sq *Queue) resourceFitsAllocated(res *resources.Resource) bool {
 }
 
 // IncPreemptingResource increments the preempting resources for this queue (recursively).
-// +checklocksexclude:sq.RWMutex
 func (sq *Queue) IncPreemptingResource(alloc *resources.Resource) {
 	if sq == nil {
 		return
@@ -1540,7 +1483,6 @@ func (sq *Queue) IncPreemptingResource(alloc *resources.Resource) {
 }
 
 // DecPreemptingResource decrements the preempting resources for this queue (recursively).
-// +checklocksexclude:sq.RWMutex
 func (sq *Queue) DecPreemptingResource(alloc *resources.Resource) {
 	if sq == nil {
 		return
@@ -1557,7 +1499,6 @@ func (sq *Queue) DecPreemptingResource(alloc *resources.Resource) {
 	sq.preemptingResource.Prune()
 }
 
-// +checklocksexcludewrite:sq.RWMutex
 func (sq *Queue) IsPrioritySortEnabled() bool {
 	sq.RLock()
 	defer sq.RUnlock()
@@ -1753,7 +1694,6 @@ func (sq *Queue) internalGetMax(parentLimit *resources.Resource) *resources.Reso
 
 // SetMaxResource sets the max resource for the root queue. Called as part of adding or removing a node.
 // Should only happen on the root, all other queues get it from the config via properties.
-// +checklocksexclude:sq.RWMutex
 func (sq *Queue) SetMaxResource(max *resources.Resource) {
 	sq.Lock()
 	defer sq.Unlock()
@@ -2025,7 +1965,6 @@ func (sq *Queue) TryReservedAllocate(iterator func() NodeIterator) *AllocationRe
 
 // GetReservedApps returns a shallow copy of the reserved app list
 // locked to prevent race conditions from event updates
-// +checklocksexcludewrite:sq.RWMutex
 func (sq *Queue) GetReservedApps() map[string]int {
 	sq.RLock()
 	defer sq.RUnlock()
@@ -2040,7 +1979,6 @@ func (sq *Queue) GetReservedApps() map[string]int {
 
 // Reserve increments the number of reservations for the application adding it to the map if needed.
 // No checks this is only called when a reservation is processed using the app stored in the queue.
-// +checklocksexclude:sq.RWMutex
 func (sq *Queue) Reserve(appID string) {
 	sq.Lock()
 	defer sq.Unlock()
@@ -2051,7 +1989,6 @@ func (sq *Queue) Reserve(appID string) {
 // UnReserve decrements the number of reservations for the application removing it to the map if all
 // reservations are removed.
 // No checks this is only called when a reservation is processed using the app stored in the queue.
-// +checklocksexclude:sq.RWMutex
 func (sq *Queue) UnReserve(appID string, releases int) {
 	sq.Lock()
 	defer sq.Unlock()
@@ -2067,7 +2004,6 @@ func (sq *Queue) UnReserve(appID string, releases int) {
 }
 
 // getApplication return the Application based on the ID.
-// +checklocksexcludewrite:sq.RWMutex
 func (sq *Queue) GetApplication(appID string) *Application {
 	sq.RLock()
 	defer sq.RUnlock()
@@ -2089,7 +2025,6 @@ func (sq *Queue) getSortType() policies.SortPolicy {
 // SupportTaskGroup returns true if the queue supports task groups.
 // FIFO policy is required to support this.
 // NOTE: this call does not make sense for a parent queue, and always returns false
-// +checklocksexcludewrite:sq.RWMutex
 func (sq *Queue) SupportTaskGroup() bool {
 	sq.RLock()
 	defer sq.RUnlock()
@@ -2158,7 +2093,6 @@ func (sq *Queue) removeMetrics() {
 // cover the fmt and zap call sites, which are not calls this analysis can see, see
 // TrackedResource.String. The fix is the same.
 // +lockstringerignore
-// +checklocksexcludewrite:sq.RWMutex
 func (sq *Queue) String() string {
 	sq.RLock()
 	defer sq.RUnlock()
@@ -2224,7 +2158,6 @@ func (sq *Queue) setAllocatingAccepted(appID string) {
 	sq.allocatingAcceptedApps[appID] = true
 }
 
-// +checklocksexcludewrite:sq.RWMutex
 func (sq *Queue) GetPreemptionPolicy() policies.PreemptionPolicy {
 	sq.RLock()
 	defer sq.RUnlock()
@@ -2451,7 +2384,6 @@ func (sq *Queue) findPreemptionFenceRoot(priorityMap map[string]int64, currentPr
 	return sq.parent.findPreemptionFenceRoot(priorityMap, currentPriority, askResource)
 }
 
-// +checklocksexcludewrite:sq.RWMutex
 func (sq *Queue) GetCurrentPriority() int32 {
 	sq.RLock()
 	defer sq.RUnlock()
@@ -2463,7 +2395,6 @@ func (sq *Queue) getCurrentPriority() int32 {
 	return priorityValueByPolicy(sq.priorityPolicy, sq.priorityOffset, sq.currentPriority)
 }
 
-// +checklocksexcludewrite:sq.RWMutex
 func (sq *Queue) GetPriorityPolicyAndOffset() (policies.PriorityPolicy, int32) {
 	sq.RLock()
 	defer sq.RUnlock()
@@ -2551,14 +2482,12 @@ func (sq *Queue) recalculatePriority() int32 {
 	return priorityValueByPolicy(sq.priorityPolicy, sq.priorityOffset, curr)
 }
 
-// +checklocksexcludewrite:sq.RWMutex
 func (sq *Queue) GetMaxAppUnschedAskBackoff() uint64 {
 	sq.RLock()
 	defer sq.RUnlock()
 	return sq.unschedAskBackoff
 }
 
-// +checklocksexcludewrite:sq.RWMutex
 func (sq *Queue) GetBackoffDelay() time.Duration {
 	sq.RLock()
 	defer sq.RUnlock()

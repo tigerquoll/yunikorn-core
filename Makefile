@@ -124,7 +124,11 @@ CHECKLOCKS_GO_CURRENT=$(patsubst go%,%,$(shell "$(GO)" env GOVERSION))
 # Fixture holding a known lock violation, see the checklocks target.
 CHECKLOCKS_CANARY=pkg/locking/checklocks_canary.go
 # The messages the canary must produce, one per class of violation it holds.
-CHECKLOCKS_CANARY_MESSAGES := "invalid field access" "must not hold" "already locked" "to call callbackSelfLocking" "guarded read races" "the declared order has" "a wait under a lock"
+# The last two are the derived facts: an exclusion the canary does not state, and a field guard
+# the canary states on the type rather than on the field. Both are required by name because the
+# other messages here would keep the canary green if either derivation were lost, and hundreds of
+# annotations were deleted from this repository on the strength of them.
+CHECKLOCKS_CANARY_MESSAGES := "invalid field access" "must not hold" "already locked" "to call callbackSelfLocking" "guarded read races" "the declared order has" "a wait under a lock" "to call derivedSelfLocking" "when accessing structGuardedValue"
 
 all:
 	$(MAKE) -C $(dir $(BASE_DIR)) build

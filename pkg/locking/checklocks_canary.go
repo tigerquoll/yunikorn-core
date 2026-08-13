@@ -51,6 +51,13 @@ import "strconv"
 //	              on the self deadlock rules, the third only holds while the wrapper types
 //	              declare themselves locks, and the fourth only while a guard can name an
 //	              asserted value, which is what the fsm callbacks are annotated with
+//	              plus two more that no annotation in this file states, and that the code
+//	              base now depends on being derived rather than written: the exclusion of
+//	              a method that takes its own lock, and the guard a structure declares for
+//	              its fields. Both replaced hundreds of hand written annotations, so a
+//	              release of the analyser that stopped deriving either one would drop that
+//	              protection everywhere without a single build turning red. The two
+//	              fixtures below are what turns it red.
 //	lockstringer  a String method reading a guarded field, which races whatever fmt or zap
 //	              was formatting it under
 //	lockorder     an acquisition that takes the classes in the order the declaration
@@ -167,6 +174,63 @@ func callbackTable() map[string]func(*callbackEvent) {
 			subject.callbackSelfLocking(2)
 		},
 	}
+}
+
+// derivedCanary is the subject of the derived exclusion fixture. Its lock and its field are
+// apart from the ones above so that a diagnostic about either can only have come from here.
+type derivedCanary struct {
+	// +checklocks:mu
+	derivedValue int
+	mu           RWMutex
+}
+
+// derivedSelfLocking carries NO exclusion annotation on purpose. It takes its own lock, which
+// is all the analysis needs to know that a caller holding that lock deadlocks, so the fact is
+// derived from this body. The hand written exclusions this repository used to carry on every
+// method of this shape were deleted on the strength of that derivation.
+func (d *derivedCanary) derivedSelfLocking(value int) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.derivedValue = value
+}
+
+// derivedReentrantCall is the violation: it holds the lock over a call to a method that takes
+// it. Nothing states the exclusion, so the analysis must have derived it, and the make target
+// requires the message by the callee's name. An analyser that stopped deriving would leave the
+// other exclusion messages in this file intact, which is the failure this fixture exists for.
+func (d *derivedCanary) derivedReentrantCall(value int) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.derivedSelfLocking(value)
+}
+
+// structGuardCanary states the guard once, on the type, instead of once per field. Every field
+// is guarded by it except the ones opting out, which is how the scheduler objects are annotated
+// since the per field guards were collapsed.
+//
+// +checklocksguardedby:mu
+type structGuardCanary struct {
+	structGuardedValue int
+	// +checklocksunguarded
+	structFixedValue int
+	mu               RWMutex
+}
+
+// structGuardedWrite is correct, the lock is held for the write. It must not be reported.
+func (s *structGuardCanary) structGuardedWrite(value int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.structGuardedValue = value
+}
+
+// structGuardViolation is the violation: the field carries no annotation of its own and is
+// written without the lock, so it is only guarded while the annotation on the type expands to
+// it. The make target requires the message by the field's name. The write below it must never
+// be reported: an expansion that ignored the opt out would report both, and requiring only the
+// first message would pass in that world too.
+func (s *structGuardCanary) structGuardViolation(value int) {
+	s.structGuardedValue = value
+	s.structFixedValue = value
 }
 
 // canaryOuter and canaryInner carry the two classes of the edge declared at the top of this

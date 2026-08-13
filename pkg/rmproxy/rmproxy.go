@@ -209,6 +209,7 @@ func (rmp *RMProxy) handleRMEvents() {
 	}
 }
 
+// Stated, not derived: a closure captures the receiver, hiding the acquisition from the derivation.
 // +checklocksexclude:rmp.RWMutex
 func (rmp *RMProxy) RegisterResourceManager(request *si.RegisterResourceManagerRequest, callback api.ResourceManagerCallback) (*si.RegisterResourceManagerResponse, error) {
 	rmp.Lock()
@@ -257,7 +258,6 @@ func (rmp *RMProxy) RegisterResourceManager(request *si.RegisterResourceManagerR
 	return nil, fmt.Errorf("registration of RM failed: %v", result.Reason)
 }
 
-// +checklocksexcludewrite:rmp.RWMutex
 func (rmp *RMProxy) GetResourceManagerCallback(rmID string) api.ResourceManagerCallback {
 	rmp.RLock()
 	defer rmp.RUnlock()

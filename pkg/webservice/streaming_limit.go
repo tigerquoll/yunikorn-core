@@ -33,16 +33,14 @@ import (
 var idGen atomic.Uint64
 
 // StreamingLimiter tracks the concurrent streaming connections.
+// +checklocksguardedby:Mutex
 type StreamingLimiter struct {
-	// +checklocks:Mutex
 	perHostStreams map[string]uint64 // number of connections per host
-	// +checklocks:Mutex
-	streams uint64 // number of connections (total)
-	id      string // unique name for configmap callback
+	streams        uint64            // number of connections (total)
+	// +checklocksunguarded
+	id string // unique name for configmap callback
 
-	// +checklocks:Mutex
-	maxStreams uint64 // maximum number of event streams
-	// +checklocks:Mutex
+	maxStreams        uint64 // maximum number of event streams
 	maxPerHostStreams uint64 // maximum number of event streams per host
 
 	locking.Mutex
@@ -63,7 +61,6 @@ func NewStreamingLimiter() *StreamingLimiter {
 	return sl
 }
 
-// +checklocksexclude:sl.Mutex
 func (sl *StreamingLimiter) AddHost(host string) bool {
 	sl.Lock()
 	defer sl.Unlock()
@@ -86,7 +83,6 @@ func (sl *StreamingLimiter) AddHost(host string) bool {
 	return true
 }
 
-// +checklocksexclude:sl.Mutex
 func (sl *StreamingLimiter) RemoveHost(host string) {
 	sl.Lock()
 	defer sl.Unlock()

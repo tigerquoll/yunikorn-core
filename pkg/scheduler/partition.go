@@ -46,40 +46,38 @@ import (
 )
 
 // +lockclass:PartitionContext
+// +checklocksguardedby:RWMutex
 type PartitionContext struct {
+	// +checklocksunguarded
 	RmID string // the RM the partition belongs to
+	// +checklocksunguarded
 	Name string // name of the partition
 
-	// Private fields need protection
-	root *objects.Queue // start of the queue hierarchy
-	// +checklocks:RWMutex
-	applications map[string]*objects.Application // applications assigned to this partition
-	// +checklocks:RWMutex
+	// +checklocksunguarded
+	root                  *objects.Queue                  // start of the queue hierarchy
+	applications          map[string]*objects.Application // applications assigned to this partition
 	completedApplications map[string]*objects.Application // completed applications from this partition
-	// +checklocks:RWMutex
-	rejectedApplications map[string]*objects.Application // rejected applications from this partition
-	nodes                objects.NodeCollection          // nodes assigned to this partition
-	placementManager     *placement.AppPlacementManager  // placement manager for this partition
-	partitionManager     *partitionManager               // manager for this partition
-	stateMachine         *fsm.FSM                        // the state of the partition for scheduling
-	// +checklocks:RWMutex
-	stateTime      time.Time                // last time the state was updated (needed for cleanup)
-	userGroupCache *security.UserGroupCache // user cache per partition
-	// +checklocks:RWMutex
-	totalPartitionResource *resources.Resource // Total node resources
-	// +checklocks:RWMutex
-	allocations int // Number of allocations on the partition
-	// +checklocks:RWMutex
-	reservations int // number of reservations
-	// +checklocks:RWMutex
-	placeholderAllocations int // number of placeholder allocations
-	// +checklocks:RWMutex
-	preemptionEnabled bool // whether preemption is enabled or not
-	// +checklocks:RWMutex
-	quotaPreemptionEnabled bool // whether quota preemption is enabled or not
-	// +checklocks:RWMutex
-	foreignAllocs   map[string]*objects.Allocation // foreign (non-Yunikorn) allocations
-	appQueueMapping *objects.AppQueueMapping       // appID mapping to queues
+	rejectedApplications  map[string]*objects.Application // rejected applications from this partition
+	// +checklocksunguarded
+	nodes objects.NodeCollection // nodes assigned to this partition
+	// +checklocksunguarded
+	placementManager *placement.AppPlacementManager // placement manager for this partition
+	// +checklocksunguarded
+	partitionManager *partitionManager // manager for this partition
+	// +checklocksunguarded
+	stateMachine *fsm.FSM  // the state of the partition for scheduling
+	stateTime    time.Time // last time the state was updated (needed for cleanup)
+	// +checklocksunguarded
+	userGroupCache         *security.UserGroupCache       // user cache per partition
+	totalPartitionResource *resources.Resource            // Total node resources
+	allocations            int                            // Number of allocations on the partition
+	reservations           int                            // number of reservations
+	placeholderAllocations int                            // number of placeholder allocations
+	preemptionEnabled      bool                           // whether preemption is enabled or not
+	quotaPreemptionEnabled bool                           // whether quota preemption is enabled or not
+	foreignAllocs          map[string]*objects.Allocation // foreign (non-Yunikorn) allocations
+	// +checklocksunguarded
+	appQueueMapping *objects.AppQueueMapping // appID mapping to queues
 
 	// The partition write lock must not be held while manipulating an application.
 	// Scheduling is running continuously as a lock free background task. Scheduling an application
@@ -122,7 +120,6 @@ func newPartitionContext(conf configs.PartitionConfig, rmID string, cc *ClusterC
 }
 
 // GetUserGroupResolverType returns the user group resolver set for the partition.
-// +checklocksexcludewrite:pc.RWMutex
 func (pc *PartitionContext) GetUserGroupResolverType() string {
 	pc.RLock()
 	defer pc.RUnlock()
@@ -345,7 +342,6 @@ func (pc *PartitionContext) getPlacementManager() *placement.AppPlacementManager
 // Runs the placement rules for the queue resolution. Creates a new dynamic queue if the queue does not yet
 // exists.
 // NOTE: this is a lock free call. It must NOT be called holding the PartitionContext lock.
-// +checklocksexclude:pc.RWMutex
 func (pc *PartitionContext) AddApplication(app *objects.Application) error {
 	if pc.isDraining() || pc.isStopped() {
 		return fmt.Errorf("partition %s is stopped cannot add a new application %s", pc.Name, app.ApplicationID)
@@ -513,7 +509,6 @@ func (pc *PartitionContext) getRejectedApplication(appID string) *objects.Applic
 // GetQueue returns queue from the structure based on the fully qualified name.
 // Wrapper around the unlocked version getQueueInternal()
 // Visible by tests
-// +checklocksexcludewrite:pc.RWMutex
 func (pc *PartitionContext) GetQueue(name string) *objects.Queue {
 	pc.RLock()
 	defer pc.RUnlock()
@@ -613,7 +608,6 @@ func (pc *PartitionContext) GetNode(nodeID string) *objects.Node {
 // AddNode adds the node to the partition. Updates the partition and root queue resources if the node is added
 // successfully to the partition.
 // NOTE: this is a lock free call. It must NOT be called holding the PartitionContext lock.
-// +checklocksexclude:pc.RWMutex
 func (pc *PartitionContext) AddNode(node *objects.Node) error {
 	if node == nil {
 		return fmt.Errorf("cannot add 'nil' node to partition %s", pc.Name)
@@ -652,7 +646,6 @@ func (pc *PartitionContext) updatePartitionResource(delta *resources.Resource) {
 // addNodeToList adds a node to the partition, and updates the metrics & resource tracking information
 // if the node was added successfully to the partition.
 // NOTE: this is a lock free call. It must NOT be called holding the PartitionContext lock.
-// +checklocksexclude:pc.RWMutex
 func (pc *PartitionContext) addNodeToList(node *objects.Node) error {
 	// we don't grab a lock here because we only update pc.nodes which is internally protected
 	if err := pc.nodes.AddNode(node); err != nil {
@@ -691,7 +684,6 @@ func (pc *PartitionContext) removeNodeFromList(nodeID string) *objects.Node {
 // The confirmed allocations are real allocations that are linked to placeholders on the current node and are linked to
 // other nodes.
 // NOTE: this is a lock free call. It must NOT be called holding the PartitionContext lock.
-// +checklocksexclude:pc.RWMutex
 func (pc *PartitionContext) removeNode(nodeID string) ([]*objects.Allocation, []*objects.Allocation) {
 	log.Log(log.SchedPartition).Info("Removing node from partition",
 		zap.String("partition", pc.Name),
@@ -728,6 +720,7 @@ func (pc *PartitionContext) removeNode(nodeID string) ([]*objects.Allocation, []
 // of the node object as updating the applications and queues is the only goal. Applications and queues are not accessible
 // from the node. The removed and confirmed allocations are returned.
 // NOTE: this is a lock free call. It must NOT be called holding the PartitionContext lock.
+// The body only reads the lock, so the derivation would exclude a writer alone: keep the wider rule.
 // +checklocksexclude:pc.RWMutex
 func (pc *PartitionContext) removeNodeAllocations(node *objects.Node) ([]*objects.Allocation, []*objects.Allocation) {
 	released := make([]*objects.Allocation, 0)
@@ -916,6 +909,7 @@ func (pc *PartitionContext) tryPlaceholderAllocate() *objects.AllocationResult {
 
 // Process the allocation and make the left over changes in the partition.
 // NOTE: this is a lock free call. It must NOT be called holding the PartitionContext lock.
+// The body only reads the lock, so the derivation would exclude a writer alone: keep the wider rule.
 // +checklocksexclude:pc.RWMutex
 func (pc *PartitionContext) allocate(result *objects.AllocationResult) *objects.AllocationResult {
 	// find the app make sure it still exists
@@ -1050,7 +1044,6 @@ func (pc *PartitionContext) reserve(app *objects.Application, node *objects.Node
 
 // unReserve removes the reservation from the objects in the scheduler
 // NOTE: this is a lock free call. It must NOT be called holding the PartitionContext lock.
-// +checklocksexclude:pc.RWMutex
 func (pc *PartitionContext) unReserve(app *objects.Application, node *objects.Node, ask *objects.Allocation) {
 	// remove the reservation of the app, this will also unReserve the node
 	num := app.UnReserve(node, ask)
@@ -1088,7 +1081,6 @@ func (pc *PartitionContext) updateAllocationCount(allocs int) {
 	pc.allocations += allocs
 }
 
-// +checklocksexcludewrite:pc.RWMutex
 func (pc *PartitionContext) GetTotalPartitionResource() *resources.Resource {
 	pc.RLock()
 	defer pc.RUnlock()
@@ -1096,7 +1088,6 @@ func (pc *PartitionContext) GetTotalPartitionResource() *resources.Resource {
 	return pc.totalPartitionResource.Clone()
 }
 
-// +checklocksexcludewrite:pc.RWMutex
 func (pc *PartitionContext) GetAllocatedResource() *resources.Resource {
 	pc.RLock()
 	defer pc.RUnlock()
@@ -1104,7 +1095,6 @@ func (pc *PartitionContext) GetAllocatedResource() *resources.Resource {
 	return pc.root.GetAllocatedResource()
 }
 
-// +checklocksexcludewrite:pc.RWMutex
 func (pc *PartitionContext) GetTotalAllocationCount() int {
 	pc.RLock()
 	defer pc.RUnlock()
@@ -1116,7 +1106,6 @@ func (pc *PartitionContext) GetTotalNodeCount() int {
 }
 
 // GetApplications returns a slice of the current applications tracked by the partition.
-// +checklocksexcludewrite:pc.RWMutex
 func (pc *PartitionContext) GetApplications() []*objects.Application {
 	pc.RLock()
 	defer pc.RUnlock()
@@ -1128,7 +1117,6 @@ func (pc *PartitionContext) GetApplications() []*objects.Application {
 }
 
 // GetCompletedApplications returns a slice of the completed applications tracked by the partition.
-// +checklocksexcludewrite:pc.RWMutex
 func (pc *PartitionContext) GetCompletedApplications() []*objects.Application {
 	pc.RLock()
 	defer pc.RUnlock()
@@ -1140,7 +1128,6 @@ func (pc *PartitionContext) GetCompletedApplications() []*objects.Application {
 }
 
 // GetRejectedApplications returns a slice of the rejected applications tracked by the partition.
-// +checklocksexcludewrite:pc.RWMutex
 func (pc *PartitionContext) GetRejectedApplications() []*objects.Application {
 	pc.RLock()
 	defer pc.RUnlock()
@@ -1212,7 +1199,6 @@ func (pc *PartitionContext) GetNodes() []*objects.Node {
 // Upon successfully processing, two flags are returned: requestCreated (if a new request was added) and allocCreated (if an allocation was satisifed).
 // This can be used by callers that need this information to take further action.
 // NOTE: this is a lock free call. It must NOT be called holding the PartitionContext lock.
-// +checklocksexclude:pc.RWMutex
 func (pc *PartitionContext) UpdateAllocation(alloc *objects.Allocation) (requestCreated bool, allocCreated bool, err error) { //nolint:funlen
 	// cannot do anything with a nil alloc, should only happen if the shim broke things badly
 	if alloc == nil {
@@ -1476,6 +1462,7 @@ func (pc *PartitionContext) getOrStoreForeignAlloc(alloc *objects.Allocation) bo
 // if slice[9] = 3, this means there are 3 nodes resource usage is in the range 80% to 90%.
 //
 // NOTE: this is a lock free call. It must NOT be called holding the PartitionContext lock.
+// The body takes no lock of its own, so there is nothing for the derivation to work from.
 // +checklocksexclude:pc.RWMutex
 func (pc *PartitionContext) calculateNodesResourceUsage() map[string][]int {
 	nodesCopy := pc.GetNodes()
@@ -1539,7 +1526,6 @@ func (pc *PartitionContext) processAllocationRelease(release *si.AllocationRelea
 
 // removeAllocation removes the referenced allocation(s) from the applications and nodes
 // NOTE: this is a lock free call. It must NOT be called holding the PartitionContext lock.
-// +checklocksexclude:pc.RWMutex
 func (pc *PartitionContext) removeAllocation(release *si.AllocationRelease) ([]*objects.Allocation, *objects.Allocation) {
 	if release == nil {
 		return nil, nil
@@ -1681,7 +1667,6 @@ func (pc *PartitionContext) replacePlaceholderOnNode(alloc *objects.Allocation, 
 // rollbackAllocation handles a shim-initiated scheduling failure by rolling the allocation back to a pending ask
 // so the core can re-schedule it on a different node.
 // NOTE: this is a lock free call. It must NOT be called holding the PartitionContext lock.
-// +checklocksexclude:pc.RWMutex
 func (pc *PartitionContext) rollbackAllocation(appID, allocationKey string, app *objects.Application) ([]*objects.Allocation, *objects.Allocation) {
 	queue := app.GetQueue()
 	// Retrieve node ID before rolling back (RollbackAllocation clears it on the ask).
@@ -1763,7 +1748,6 @@ func (pc *PartitionContext) GetCurrentState() string {
 	return pc.stateMachine.Current()
 }
 
-// +checklocksexcludewrite:pc.RWMutex
 func (pc *PartitionContext) GetStateTime() time.Time {
 	pc.RLock()
 	defer pc.RUnlock()
@@ -1780,14 +1764,12 @@ func (pc *PartitionContext) GetNodeSortingResourceWeights() map[string]float64 {
 	return policy.ResourceWeights()
 }
 
-// +checklocksexcludewrite:pc.RWMutex
 func (pc *PartitionContext) IsPreemptionEnabled() bool {
 	pc.RLock()
 	defer pc.RUnlock()
 	return pc.preemptionEnabled
 }
 
-// +checklocksexcludewrite:pc.RWMutex
 func (pc *PartitionContext) IsQuotaPreemptionEnabled() bool {
 	pc.RLock()
 	defer pc.RUnlock()
