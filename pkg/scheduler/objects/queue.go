@@ -64,8 +64,11 @@ type Queue struct {
 	appPriorities   map[string]int32        // cached priorities for application
 	reservedApps    map[string]int          // applications reserved within this queue, with reservation count
 	// link back to the parent in the scheduler, set on creation and never changed:
-	// read without the lock on purpose, see the parent first idiom in the queue locking rules
+	// read without the lock on purpose, see the parent first idiom in the queue locking rules.
+	// It is also the hierarchy edge: Queue is a hierarchical class, so two queues may nest,
+	// and this field is what tells the analysis which of the two is the parent.
 	// +checklocksunguarded
+	// +lockhierarchyedge
 	parent               *Queue
 	pending              *resources.Resource       // pending resource for the apps in the queue
 	allocatedResource    *resources.Resource       // allocated resource for the apps in the queue

@@ -18,6 +18,12 @@
  limitations under the License.
 */
 
+// The edge and the hierarchical class below, and the classes they relate, belong to this file
+// alone. They are read only when the analyzer is handed this file, which no build ever is, so
+// the taxonomy declared in locking.go is not affected by them.
+//
+// +lockorder:CanaryOuter < CanaryInner
+// +lockhierarchical:CanaryTree
 package locking
 
 import "strconv"
@@ -55,6 +61,12 @@ import "strconv"
 //	              fixtures below are what turns it red.
 //	lockstringer  a String method reading a guarded field, which races whatever fmt or zap
 //	              was formatting it under
+//	lockorder     an acquisition that takes two classes in the order the declaration forbids,
+//	              two locks of one class nested, and a hierarchical class locked child first.
+//	              The three are required separately because they are lost separately: the
+//	              last one is behind "-lockorder.hierarchy", which is off by default, so a
+//	              flag dropped from the make target would take that check with it and leave
+//	              the other two reporting
 //	lockblocking  a wait for something outside this process while a classed lock is held
 
 type canary struct {
@@ -232,9 +244,11 @@ func (s *structGuardCanary) structGuardViolation(value int) {
 	s.structFixedValue = value
 }
 
-// canaryOuter carries a lock class, which is what lockblocking keys on: it reports a wait
-// while a CLASSED lock is held, so a type with no class of its own would leave the fixture
-// below silent and the coverage lost without a single message going missing elsewhere.
+// canaryOuter carries a lock class, which is what both lockorder and lockblocking key on:
+// the second reports a wait while a CLASSED lock is held, so a type with no class of its own
+// would leave the fixture below silent and the coverage lost without a single message going
+// missing elsewhere. The class is also the before side of the edge declared at the top of
+// this file, see downwardAcquire.
 //
 // +lockclass:CanaryOuter
 type canaryOuter struct {
@@ -258,4 +272,83 @@ func (o *canaryOuter) blockingReceive(reply chan int) int {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	return <-reply
+}
+
+// canaryInner is the after side of the declared edge, in the second of the two shapes the
+// code base uses: an embedded lock rather than a named field. It is unrelated to CanaryTree
+// below, so the same class rule applies to it and nothing exempts it.
+//
+// +lockclass:CanaryInner
+type canaryInner struct {
+	RWMutex
+}
+
+// downwardAcquire takes the two classes in the declared order. It must not be reported.
+func downwardAcquire(o *canaryOuter, i *canaryInner) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	i.Lock()
+	defer i.Unlock()
+}
+
+// upwardAcquire is the first lockorder violation: the outer class is declared before the
+// inner one, so taking it while the inner one is held is the inversion. The analysis must
+// report the declared order here.
+func upwardAcquire(o *canaryOuter, i *canaryInner) {
+	i.Lock()
+	defer i.Unlock()
+	o.mu.Lock()
+	defer o.mu.Unlock()
+}
+
+// sameClassNesting is the second lockorder violation, and it is the one no instance keyed
+// detector can see: two locks of ONE class, which deadlock the moment two goroutines pick
+// the two instances in opposite orders. The analysis must report that two locks of one class
+// must not nest. It is required separately because it is a rule of its own rather than an
+// edge of the declared order, and because it is the rule the Application class is currently
+// withheld from, see locking.go.
+func sameClassNesting(a, b *canaryInner) {
+	a.Lock()
+	defer a.Unlock()
+	b.Lock()
+	defer b.Unlock()
+}
+
+// canaryTree is hierarchical: two of its locks nest by design, as a queue walks its own tree,
+// so the same class rule above is exempt for it and only the DIRECTION is left to check. The
+// parent link is what carries that direction, which is why it is annotated.
+//
+// +lockclass:CanaryTree
+type canaryTree struct {
+	RWMutex
+
+	// +lockhierarchyedge
+	parent   *canaryTree
+	children []*canaryTree
+}
+
+// parentThenChild is the sanctioned direction and must not be reported, as must the mere
+// nesting of two locks of the class: a hierarchical class is exempt from that rule.
+func (t *canaryTree) parentThenChild() {
+	t.Lock()
+	defer t.Unlock()
+	for _, child := range t.children {
+		child.Lock()
+		child.Unlock()
+	}
+}
+
+// childThenParent is the third lockorder violation: the parent is taken while the child is
+// held, which is the inversion of the walk everything else does. The analysis must report
+// that a hierarchical class must be locked parent first.
+//
+// This one is only reported while "-lockorder.hierarchy" is on the command line, and it is
+// off by default, so it is the message that a flag quietly dropped from the make target
+// would take with it while every other message here keeps firing.
+func (t *canaryTree) childThenParent() int {
+	t.Lock()
+	defer t.Unlock()
+	t.parent.RLock()
+	defer t.parent.RUnlock()
+	return len(t.parent.children)
 }

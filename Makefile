@@ -125,11 +125,14 @@ VETLOCK_GO_CURRENT=$(patsubst go%,%,$(shell "$(GO)" env GOVERSION))
 # Fixture holding a known lock violation, see the vetlock target.
 VETLOCK_CANARY=pkg/locking/checklocks_canary.go
 # The messages the canary must produce, one per class of violation it holds.
-# The last two are the derived facts: an exclusion the canary does not state, and a field guard
+# Two of them are the derived facts: an exclusion the canary does not state, and a field guard
 # the canary states on the type rather than on the field. Both are required by name because the
 # other messages here would keep the canary green if either derivation were lost, and hundreds of
 # annotations were deleted from this repository on the strength of them.
-VETLOCK_CANARY_MESSAGES := "invalid field access" "must not hold" "already locked" "to call callbackSelfLocking" "guarded read races" "a wait under a lock" "to call derivedSelfLocking" "when accessing structGuardedValue"
+# The last three are the ordering rules, which are lost separately: an edge of the declared
+# order, the same class rule that no instance keyed detector can see, and the direction within a
+# hierarchical class, which only reports while "-lockorder.hierarchy" is passed below.
+VETLOCK_CANARY_MESSAGES := "invalid field access" "must not hold" "already locked" "to call callbackSelfLocking" "guarded read races" "a wait under a lock" "to call derivedSelfLocking" "when accessing structGuardedValue" "the declared order has" "must not nest" "must be locked parent first"
 
 all:
 	$(MAKE) -C $(dir $(BASE_DIR)) build
@@ -195,12 +198,16 @@ VETLOCK_PACKAGES := $(REPO)/...
 # The vet tool runs several analyses and every one of them is named on the command line. Naming
 # them is not the same as taking the default: an analysis added by a later version of the tool
 # then has to be adopted deliberately instead of appearing as a wall of findings on an unrelated
-# change. Each analysis has its flags under its own name. "lockorder" is deliberately not named
-# here: the order in which this code base nests its lock classes is a separate piece of work. The
-# "+lockclass" annotations it shares are still carried, because "lockblocking" reports a wait made
-# while a CLASSED lock is held and a type without a class leaves it silent.
-VETLOCK_ANALYZERS := -checklocks -lockstringer -lockblocking
-VETLOCK_FLAGS := $(VETLOCK_ANALYZERS) -checklocks.inferred=false
+# change. Each analysis has its flags under its own name. "lockorder" checks the nesting of the
+# lock CLASSES against the order declared in the package doc of pkg/locking, which is the one
+# check that sees a pair of locks two goroutines take in opposite orders without the two having
+# to meet. Its hierarchy mode is off by default and is turned on here: it recovers the direction
+# of a nesting within a hierarchical class, which is the queue parent and child rule, from the
+# "+lockhierarchyedge" on the parent link. The edge is annotated, so "-lockorder.hierarchyinfer"
+# is not needed: that flag guesses the parent link from a field of the type's own type, and a
+# self typed field is not necessarily a parent.
+VETLOCK_ANALYZERS := -checklocks -lockstringer -lockblocking -lockorder
+VETLOCK_FLAGS := $(VETLOCK_ANALYZERS) -checklocks.inferred=false -lockorder.hierarchy=true
 # The file lists of all packages are collected in a single "go list" run and a failure to list
 # aborts the target: a package that cannot be loaded must not be silently skipped. Every package
 # is then analysed, a failure only remembered, so that one bad package does not hide the findings
