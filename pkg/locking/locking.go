@@ -22,6 +22,13 @@
 // it up through its import rather than restating it. The classes themselves are declared on the
 // types that carry the locks, see the "+lockclass" annotations there.
 //
+// The same order is enforced at runtime by the class order check of lockclass_deadlock.go,
+// which reads its own copy of the graph from "declaredOrder". The two declarations are kept in
+// step by TestLockOrderAnnotationsMatchRuntime, which also checks that the class each type is
+// annotated with is the class its constructor registers with SetClass. A drift between them is
+// otherwise silent: the static side would pass what the runtime side rejects, or the other way
+// round, with no build ever failing.
+//
 // The relation is a partial order and it is closed transitively: a pair the closure does not
 // relate is not checked, because the taxonomy says nothing about it. Only the classes whose
 // order the scheduler actually settles are declared; anything else stays classless.
@@ -70,6 +77,7 @@ const (
 	EnvDeadlockTimeoutSeconds   = "DEADLOCK_TIMEOUT_SECONDS"
 	EnvExitOnDeadlock           = "DEADLOCK_EXIT"
 	EnvDisableLockOrder         = "DEADLOCK_DISABLE_LOCK_ORDER"
+	EnvClassOrderEnabled        = "DEADLOCK_CLASS_ORDER_ENABLED"
 )
 
 var (
@@ -129,6 +137,13 @@ func reInit() {
 	}
 	exitOnDeadlock.Store(exitOnDetect)
 
+	var classOrder bool
+	classOrder, err = strconv.ParseBool(os.Getenv(EnvClassOrderEnabled))
+	if err != nil {
+		classOrder = false
+	}
+	classOrderEnabled.Store(classOrder && classOrderSupported)
+
 	// set deadlock detection options
 	godeadlock.Opts.Disable = !enabled
 	godeadlock.Opts.DeadlockTimeout = time.Duration(timeoutSec) * time.Second
@@ -140,6 +155,10 @@ func reInit() {
 		// We want to ensure that we write this before any other subsystem is initialized, including logging which may also use locks.
 		// no way to handle errors just ignore
 		_, _ = fmt.Fprintf(os.Stderr, "=== Deadlock detection enabled (timeout: %d seconds, exit on deadlock: %t, locking order disabled: %t) ===\n", timeoutSec, exitOnDetect, disableOrder)
+	}
+	if classOrder && classOrderSupported {
+		// no way to handle errors just ignore
+		_, _ = fmt.Fprintf(os.Stderr, "=== Lock class order checking enabled ===\n")
 	}
 }
 
@@ -185,9 +204,13 @@ func IsDeadlockDetected() bool {
 // +checklockslocktype
 type Mutex struct {
 	mu godeadlock.Mutex
+	// class is the ordering class, see lockclass.go. Zero means the lock is not ordered.
+	class atomic.Uint32
 }
 
 // +checklockslocktype
 type RWMutex struct {
 	mu godeadlock.RWMutex
+	// class is the ordering class, see lockclass.go. Zero means the lock is not ordered.
+	class atomic.Uint32
 }

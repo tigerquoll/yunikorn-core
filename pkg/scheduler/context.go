@@ -85,6 +85,7 @@ func NewClusterContext(rmID, policyGroup string, config []byte) (*ClusterContext
 		startTime:           time.Now(),
 		uuid:                common.GetNewUUID(),
 	}
+	cc.SetClass(locking.ClassClusterContext)
 	// If reservation is turned off set the reservation delay to the maximum duration defined.
 	// The time package does not export maxDuration so use the equivalent from the math package.
 	if cc.reservationDisabled {
@@ -108,6 +109,7 @@ func newClusterContext() *ClusterContext {
 		startTime:           time.Now(),
 		uuid:                common.GetNewUUID(),
 	}
+	cc.SetClass(locking.ClassClusterContext)
 	// If reservation is turned off set the reservation delay to the maximum duration defined.
 	// The time package does not export maxDuration so use the equivalent from the math package.
 	if cc.reservationDisabled {

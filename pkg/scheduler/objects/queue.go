@@ -117,10 +117,11 @@ type Queue struct {
 // newBlankQueue creates a new empty queue objects with all values initialised.
 // The queue it returns cannot be reached by anything else yet, which is what lets its callers
 // finish building it without the queue lock. The claim is checked here: publishing the queue
-// anywhere on the way to the return is reported.
+// anywhere on the way to the return is reported. Registering the lock class does not publish
+// it, that call takes the address of the lock and a lock is no handle on its object.
 // +checklocksreturnsfresh
 func newBlankQueue() *Queue {
-	return &Queue{
+	sq := &Queue{
 		children:                 make(map[string]*Queue),
 		childPriorities:          make(map[string]int32),
 		applications:             make(map[string]*Application),
@@ -140,6 +141,8 @@ func newBlankQueue() *Queue {
 		quotaPreemptionStartTime: time.Time{},
 		askBackoffDelay:          configs.DefaultAskBackOffDelay,
 	}
+	sq.SetClass(locking.ClassQueue)
+	return sq
 }
 
 // NewConfiguredQueue creates a new queue from scratch based on the configuration

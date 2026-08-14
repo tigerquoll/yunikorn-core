@@ -85,6 +85,7 @@ func NewNode(proto *si.NodeInfo) *Node {
 		schedulable:       true,
 		listeners:         make([]NodeListener, 0),
 	}
+	sn.SetClass(locking.ClassNode)
 	sn.nodeEvents = schedEvt.NewNodeEvents(events.GetEventSystem())
 	// initialise available resources
 	var err error
