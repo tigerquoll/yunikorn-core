@@ -304,6 +304,19 @@ func (ec *EventSystemImpl) CloseAllStreams() {
 }
 
 // reloadConfig function called by the config
+//
+// YUNIKORN-XXXX: this is a real finding, not a sanctioned gap, and the ignore below is here
+// only so that the analysis can be turned on at all. Every field it touches is read and written
+// under the lock, so what is broken is not the individual access but the atomicity of the
+// sequence: the capacities are stored under the lock and then applied from the locals after it
+// is released, and the restart is decided by a separate read in isRestartNeeded. A second reload
+// landing in either window leaves the store and the ring buffer sized from one configuration
+// while the fields say another, and lets a restart be taken on a decision that is already stale,
+// so two restarts interleave. The overlap is reachable because the config watcher starts a
+// "go reloadConfig()" per configuration change, so nothing serialises two of them. The
+// unsynchronised access this file does carry is the separate finding on the handler goroutine in
+// StartServiceWithPublisher. Both need fixing under their own JIRA, not suppressing.
+// +lockgapignore
 func (ec *EventSystemImpl) reloadConfig() {
 	// load from config for setting in two places
 	confRequestCapacity := getRequestCapacity()

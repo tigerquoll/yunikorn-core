@@ -68,6 +68,8 @@ import "strconv"
 //	              flag dropped from the make target would take that check with it and leave
 //	              the other two reporting
 //	lockblocking  a wait for something outside this process while a classed lock is held
+//	lockgap       a lock released and taken again inside one function, which is only reported
+//	              while "-lockgap.enable" is on the command line and is off by default
 
 type canary struct {
 	// +checklocks:mu
@@ -118,6 +120,12 @@ func (c *canary) String() string {
 }
 
 // relock takes and releases the lock twice over, which is balanced. It must not be reported.
+//
+// The second acquisition is a release and re-acquisition window, so it is a lockgap finding as
+// well, and the ignore below keeps it out of that analysis: the gap fixture at the end of this
+// file is the one that carries the lockgap coverage, on a lock of its own so that the message
+// the make target requires can only have come from there.
+// +lockgapignore
 func (c *canary) relock(value int) {
 	c.mu.Lock()
 	c.value = value
@@ -351,4 +359,41 @@ func (t *canaryTree) childThenParent() int {
 	t.parent.RLock()
 	defer t.parent.RUnlock()
 	return len(t.parent.children)
+}
+
+// gapCanary is the subject of the lockgap fixture. Its lock is named apart from the ones above
+// so that a diagnostic about it can only have come from here. It carries no lock class: the
+// order analysis has its own fixtures and should not see this one.
+type gapCanary struct {
+	// +checklocks:gapMu
+	gapValue int
+	gapMu    RWMutex
+}
+
+// gapPerIteration takes and releases the lock once per iteration, which is a whole critical
+// section each time round rather than a window in one. It must not be reported: dominance is
+// what the analysis asks for, and a loop is entered from outside it as well, which is what
+// keeps every loop in this code base out of the output.
+func (g *gapCanary) gapPerIteration(values []int) {
+	for _, value := range values {
+		g.gapMu.Lock()
+		g.gapValue += value
+		g.gapMu.Unlock()
+	}
+}
+
+// releaseAndRetake is the lockgap violation: the lock is dropped in the middle of the section
+// and taken again, so the value read under the first half is stale by the time the second half
+// writes it back. The analysis must report that the gapMu lock is released and taken again.
+//
+// This one is only reported while "-lockgap.enable" is on the command line, and it is off by
+// default, so it is the message that a flag quietly dropped from the make target would take
+// with it while every other message here keeps firing.
+func (g *gapCanary) releaseAndRetake(value int) {
+	g.gapMu.Lock()
+	current := g.gapValue
+	g.gapMu.Unlock()
+	g.gapMu.Lock()
+	defer g.gapMu.Unlock()
+	g.gapValue = current + value
 }

@@ -129,10 +129,13 @@ VETLOCK_CANARY=pkg/locking/checklocks_canary.go
 # the canary states on the type rather than on the field. Both are required by name because the
 # other messages here would keep the canary green if either derivation were lost, and hundreds of
 # annotations were deleted from this repository on the strength of them.
-# The last three are the ordering rules, which are lost separately: an edge of the declared
+# Three of them are the ordering rules, which are lost separately: an edge of the declared
 # order, the same class rule that no instance keyed detector can see, and the direction within a
 # hierarchical class, which only reports while "-lockorder.hierarchy" is passed below.
-VETLOCK_CANARY_MESSAGES := "invalid field access" "must not hold" "already locked" "to call callbackSelfLocking" "guarded read races" "a wait under a lock" "to call derivedSelfLocking" "when accessing structGuardedValue" "the declared order has" "must not nest" "must be locked parent first"
+# The last one is the release and re-acquisition window, which only reports while
+# "-lockgap.enable" is passed below, and is required by lock name so that it can only have come
+# from the fixture that exists for it.
+VETLOCK_CANARY_MESSAGES := "invalid field access" "must not hold" "already locked" "to call callbackSelfLocking" "guarded read races" "a wait under a lock" "to call derivedSelfLocking" "when accessing structGuardedValue" "the declared order has" "must not nest" "must be locked parent first" "the gapMu lock is released"
 
 all:
 	$(MAKE) -C $(dir $(BASE_DIR)) build
@@ -206,8 +209,13 @@ VETLOCK_PACKAGES := $(REPO)/...
 # "+lockhierarchyedge" on the parent link. The edge is annotated, so "-lockorder.hierarchyinfer"
 # is not needed: that flag guesses the parent link from a field of the type's own type, and a
 # self typed field is not necessarily a parent.
-VETLOCK_ANALYZERS := -checklocks -lockstringer -lockblocking -lockorder
-VETLOCK_FLAGS := $(VETLOCK_ANALYZERS) -checklocks.inferred=false -lockorder.hierarchy=true
+# "lockgap" reports a lock released and taken again inside one function: the second half of the
+# section acts on what the first half established, and anything could have run in between. It
+# needs both of its switches. Naming it only selects it, as it does for every analysis above;
+# a registered analysis has no off state in the multi analyzer binary, so the one that ships
+# opt-in carries "-lockgap.enable" of its own and reports nothing without it.
+VETLOCK_ANALYZERS := -checklocks -lockstringer -lockblocking -lockorder -lockgap
+VETLOCK_FLAGS := $(VETLOCK_ANALYZERS) -checklocks.inferred=false -lockorder.hierarchy=true -lockgap.enable=true
 # The file lists of all packages are collected in a single "go list" run and a failure to list
 # aborts the target: a package that cannot be loaded must not be silently skipped. Every package
 # is then analysed, a failure only remembered, so that one bad package does not hide the findings

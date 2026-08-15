@@ -209,7 +209,20 @@ func (c *UserGroupCache) ConvertUGI(ugi *si.UserGroupInformation, force bool) (U
 // call ends in os/user, and from there in the name service switch and whatever directory it
 // is configured against. The declaration is what says so.
 //
+// YUNIKORN-XXXX: the read lock is dropped for that resolution and a write lock taken to insert
+// the result, which is the shape lockgap reports. The release itself is required and must stay:
+// resolving under the lock is the very thing the "+blocking" above is there to prevent. What is
+// missing is the re-check after it. Nothing looks at the map again before inserting, so two
+// callers that miss on one user both resolve it and the second overwrites the first. That costs
+// a duplicate directory lookup and picks a winner arbitrarily; it is not a data race, since the
+// map is only ever touched under the lock and a cached entry is never mutated after it is
+// published, and it heals itself on the next call. Low, but it is the re-validation this
+// window asks for, so it is written down rather than silently accepted. The disposition is to
+// accept it: the window itself has to stay, the duplicate lookup is the whole cost, so the
+// ignore below records the decision rather than standing in for a fix that is coming.
+//
 // +blocking
+// +lockgapignore
 func (c *UserGroupCache) GetUserGroup(userName string) (UserGroup, error) {
 	// check if we have a user to resolve
 	if userName == "" {
