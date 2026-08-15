@@ -202,7 +202,7 @@ func (cc *ClusterContext) processRMRegistrationEvent(event *rmevent.RMRegistrati
 	// stop the manager without the lock held, which is why the path is never taken there. The fix
 	// on that JIRA is to drop the removePartition call from remove, not to run remove in its own
 	// goroutine, which is what reopened it the first time.
-	err = cc.updateSchedulerConfig(conf, rmID)
+	err = cc.updateSchedulerConfig(conf, rmID) // +lockorderignore
 	if err != nil {
 		event.Channel <- &rmevent.Result{Succeeded: false, Reason: err.Error()} // +lockblockingignore
 		return
@@ -259,7 +259,7 @@ func (cc *ClusterContext) processRMConfigUpdateEvent(event *rmevent.RMConfigUpda
 	}
 	// update scheduler configuration
 	// the partition removal self deadlock, see processRMRegistrationEvent above
-	err = cc.updateSchedulerConfig(conf, rmID)
+	err = cc.updateSchedulerConfig(conf, rmID) // +lockorderignore
 	if err != nil {
 		event.Channel <- &rmevent.Result{Succeeded: false, Reason: err.Error()} // +lockblockingignore
 		return
@@ -337,7 +337,7 @@ func (cc *ClusterContext) removePartitionsByRMID(event *rmevent.RMPartitionsRemo
 	for k, partition := range cc.partitions {
 		if partition.RmID == event.RmID {
 			// the partition removal self deadlock, see processRMRegistrationEvent above
-			partition.partitionManager.Stop()
+			partition.partitionManager.Stop() // +lockorderignore
 			partitionToRemove[k] = true
 		}
 	}
@@ -366,7 +366,7 @@ func (cc *ClusterContext) UpdateRMSchedulerConfig(rmID string, config []byte) er
 		return err
 	}
 	// the partition removal self deadlock, see processRMRegistrationEvent above
-	err = cc.updateSchedulerConfig(conf, rmID)
+	err = cc.updateSchedulerConfig(conf, rmID) // +lockorderignore
 	if err != nil {
 		return err
 	}
@@ -420,7 +420,7 @@ func (cc *ClusterContext) updateSchedulerConfig(conf *configs.SchedulerConfig, r
 	for _, part := range cc.partitions {
 		if !visited[part.Name] {
 			// the partition removal self deadlock, see processRMRegistrationEvent above
-			part.partitionManager.Stop()
+			part.partitionManager.Stop() // +lockorderignore
 			log.Log(log.SchedContext).Info("marked partition for removal",
 				zap.String("partitionName", part.Name))
 		}

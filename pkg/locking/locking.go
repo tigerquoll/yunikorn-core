@@ -16,6 +16,40 @@
  limitations under the License.
 */
 
+// Package locking holds the lock wrappers of the scheduler and the order in which its lock
+// classes may be taken, in the form the static analysis reads. The order is declared here, in
+// the package that owns the lock types, so that every package holding one of these locks picks
+// it up through its import rather than restating it. The classes themselves are declared on the
+// types that carry the locks, see the "+lockclass" annotations there.
+//
+// The relation is a partial order and it is closed transitively: a pair the closure does not
+// relate is not checked, because the taxonomy says nothing about it. Only the classes whose
+// order the scheduler actually settles are declared; anything else stays classless.
+//
+// +lockorder:ClusterContext < PartitionContext
+// +lockorder:PartitionContext < Application
+// +lockorder:Application < Queue
+// +lockorder:Application < Node
+// +lockorder:Application < UGMManager
+// +lockorder:UGMManager < UserTracker
+// +lockorder:UGMManager < GroupTracker
+//
+// Queue is hierarchical: a queue walks its own tree, so two queues nest by design and the
+// same class rule cannot apply to them. What must still hold is the direction, which
+// "-lockorder.hierarchy" recovers from the parent link, see the "+lockhierarchyedge" on
+// Queue.parent.
+//
+// +lockhierarchical:Queue
+//
+// Application is withheld rather than exempt: the same class rule is broken today by the
+// cross application nesting of YUNIKORN-XXXX (the preemption victim scan and the required
+// node reservation cancel both take a second application's lock while holding the first).
+// Both are latent while scheduling runs on one goroutine, and both are fixed by hoisting the
+// other application's work out of the critical section rather than by declaring an order
+// between two locks of one class. The declaration is withheld so that this stays visible
+// until then, and it is removed once those nestings are gone.
+//
+// +lockorderwithheld:Application
 package locking
 
 import (
