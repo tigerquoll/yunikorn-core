@@ -49,6 +49,7 @@ func newGroupTracker(groupName string, events *ugmEvents) *GroupTracker {
 		queueTracker: queueTracker,
 		events:       events,
 	}
+	groupTracker.SetClass(locking.ClassGroupTracker)
 	return groupTracker
 }
 

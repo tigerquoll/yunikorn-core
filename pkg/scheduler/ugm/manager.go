@@ -63,6 +63,7 @@ func newManager() *Manager {
 		groupWildCardLimitsConfig: make(map[string]*LimitConfig),
 		events:                    newUGMEvents(events.GetEventSystem()),
 	}
+	manager.SetClass(locking.ClassUGMManager)
 	return manager
 }
 

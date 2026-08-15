@@ -55,6 +55,7 @@ func newUserTracker(userName string, ugmEvents *ugmEvents) *UserTracker {
 		queueTracker:     queueTracker,
 		events:           ugmEvents,
 	}
+	userTracker.SetClass(locking.ClassUserTracker)
 	return userTracker
 }
 

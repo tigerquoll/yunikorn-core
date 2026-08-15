@@ -115,6 +115,7 @@ func newPartitionContext(conf configs.PartitionConfig, rmID string, cc *ClusterC
 		return nil, err
 	}
 
+	pc.SetClass(locking.ClassPartitionContext)
 	return pc, nil
 }
 
