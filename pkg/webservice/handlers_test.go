@@ -115,35 +115,35 @@ partitions:
 `
 
 const configMultiPartitions = `
-partitions: 
+partitions:
   - name: gpu
     usergroupresolver:
       type: test
     preemption:
       enabled: false
-    queues: 
+    queues:
     - name: root
   - name: default
     usergroupresolver:
       type: ""
     nodesortpolicy:
       type: fair
-    queues: 
+    queues:
     - name: root
-      queues: 
+      queues:
       - name: default
         submitacl: "*"
 `
 
 const configTwoLevelQueues = `
-partitions: 
+partitions:
   - name: gpu
-    queues: 
+    queues:
     - name: root
   - name: default
-    nodesortpolicy: 
+    nodesortpolicy:
       type: binpacking
-    queues: 
+    queues:
     - name: root
       properties:
         application.sort.policy: fifo
@@ -156,24 +156,24 @@ partitions:
             memory: 400000
           max:
             memory: 600000
-      queues: 
+      queues:
       - name: a
-        queues: 
+        queues:
         - name: a1
           properties:
             application.sort.policy: fifo
-          resources: 
-            guaranteed: 
+          resources:
+            guaranteed:
               memory: 500000
               vcore: 50000
-            max: 
+            max:
               memory: 800000
               vcore: 80000
-        resources: 
-          guaranteed: 
+        resources:
+          guaranteed:
             memory: 500000
             vcore: 50000
-          max: 
+          max:
             memory: 800000
             vcore: 80000
 `
@@ -992,10 +992,11 @@ func TestPartitions(t *testing.T) { //nolint:funlen
 	assert.Equal(t, cs["default"].Applications["total"], 7)
 	assert.Equal(t, cs["default"].Applications[objects.New.String()], 1)
 	assert.Equal(t, cs["default"].Applications[objects.Accepted.String()], 1)
-	assert.Equal(t, cs["default"].Applications[objects.Running.String()], 1)
+	// app-5 was Completed and then received alloc-1, which revives it into Running
+	assert.Equal(t, cs["default"].Applications[objects.Running.String()], 2)
 	assert.Equal(t, cs["default"].Applications[objects.Completing.String()], 1)
 	assert.Equal(t, cs["default"].Applications[objects.Rejected.String()], 1)
-	assert.Equal(t, cs["default"].Applications[objects.Completed.String()], 1)
+	assert.Equal(t, cs["default"].Applications[objects.Completed.String()], 0)
 	assert.Equal(t, cs["default"].Applications[objects.Failed.String()], 1)
 	assert.DeepEqual(t, cs["default"].Capacity.Capacity, map[string]int64{"memory": 1000, "vcore": 1000})
 	assert.DeepEqual(t, cs["default"].Capacity.UsedCapacity, map[string]int64{"memory": 300, "vcore": 700})
@@ -1935,6 +1936,57 @@ func TestGetApplicationHandler(t *testing.T) {
 	assert.Assert(t, appSummary.PlaceholderResource.EqualsDAO(appDao.ResourceHistory.PlaceholderResource))
 }
 
+func TestGetApplicationPlaceholderUsedResource(t *testing.T) {
+	part := setup(t, configDefault, 1)
+	defer schedulerContext.Load().Stop()
+	addNode(t, part, "node-1", resources.NewResourceFromMap(map[string]resources.Quantity{"vcore": 20, "memory": 10000}))
+	addApp(t, "app-1", part, "root.default", false)
+	addAlloc := func(alloc *objects.Allocation) {
+		_, allocCreated, err := part.UpdateAllocation(alloc)
+		assert.NilError(t, err, "allocation %s should have been added", alloc.GetAllocationKey())
+		assert.Check(t, allocCreated)
+	}
+	newPlaceholder := func(allocationKey string, vcore, memory int64) *objects.Allocation {
+		return objects.NewAllocationFromSI(&si.Allocation{
+			AllocationKey:    allocationKey,
+			ApplicationID:    "app-1",
+			NodeID:           "node-1",
+			TaskGroupName:    "tg-1",
+			Placeholder:      true,
+			ResourcePerAlloc: &si.Resource{Resources: map[string]*si.Quantity{"vcore": {Value: vcore}, "memory": {Value: memory}}},
+		})
+	}
+
+	NewWebApp(schedulerContext.Load(), nil)
+	req, err := createRequest(t, "/ws/v1/partition/default/queue/root.default/application/app-1", map[string]string{"partition": partitionNameWithoutClusterID, "queue": "root.default", "application": "app-1"})
+	assert.NilError(t, err)
+	getAppJSON := func() map[string]json.RawMessage {
+		resp := &MockResponseWriter{}
+		getApplication(resp, req)
+		var appJSON map[string]json.RawMessage
+		assert.NilError(t, json.Unmarshal(resp.outputBytes, &appJSON), unmarshalError)
+		return appJSON
+	}
+	getResource := func(appJSON map[string]json.RawMessage, field string) map[string]int64 {
+		var res map[string]int64
+		assert.NilError(t, json.Unmarshal(appJSON[field], &res), "field %s should be a resource", field)
+		return res
+	}
+
+	addAlloc(newAlloc("alloc-1", "app-1", "node-1", resources.NewResourceFromMap(map[string]resources.Quantity{"vcore": 3, "memory": 512})))
+	addAlloc(newAlloc("alloc-2", "app-1", "node-1", resources.NewResourceFromMap(map[string]resources.Quantity{"vcore": 4, "memory": 512})))
+	appJSON := getAppJSON()
+	_, ok := appJSON["placeholderUsedResource"]
+	assert.Assert(t, !ok, "placeholderUsedResource should be omitted without placeholders")
+
+	addAlloc(newPlaceholder("ph-1", 2, 2048))
+	addAlloc(newPlaceholder("ph-2", 1, 1024))
+	appJSON = getAppJSON()
+	assert.DeepEqual(t, getResource(appJSON, "usedResource"), map[string]int64{"vcore": 7, "memory": 1024})
+	assert.DeepEqual(t, getResource(appJSON, "placeholderUsedResource"), map[string]int64{"vcore": 3, "memory": 3072})
+	assert.DeepEqual(t, part.GetQueue("root.default").GetAllocatedResource().DAOMap(), map[string]int64{"vcore": 10, "memory": 4096})
+}
+
 func assertParamsMissing(t *testing.T, resp *MockResponseWriter) {
 	var errInfo dao.YAPIError
 	err := json.Unmarshal(resp.outputBytes, &errInfo)
@@ -2789,7 +2841,8 @@ func prepareUserAndGroupContext(t *testing.T, config string) {
 
 	// add an alloc
 	allocInfo := newAlloc(ask.GetAllocationKey(), ask.GetApplicationID(), "node-1", ask.GetAllocatedResource())
-	app.AddAllocation(allocInfo)
+	err = app.AddAllocation(allocInfo)
+	assert.NilError(t, err)
 	assert.Assert(t, app.IsRunning(), "Application did not return running state after alloc: %s", app.CurrentState())
 
 	NewWebApp(schedulerContext.Load(), nil)
@@ -2931,33 +2984,6 @@ func TestGetPartitionRuleHandler(t *testing.T) {
 	assert.Equal(t, partitionRules[1].ParentRule.Name, types.Fixed)
 	assert.Equal(t, partitionRules[2].Name, types.Fixed)
 	assert.Equal(t, partitionRules[3].Name, types.Recovery)
-}
-
-func TestRedirectDebugHandler(t *testing.T) {
-	NewWebApp(&scheduler.ClusterContext{}, nil)
-	base := "http://yunikorn.host.com:9080"
-	code := http.StatusMovedPermanently
-	tests := []struct {
-		name     string
-		reqURL   string
-		redirect string
-	}{
-		{"statedump", "/ws/v1/fullstatedump", "/debug/fullstatedump"},
-		{"stacks", "/ws/v1/stack", "/debug/stack"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			req, err := createRequest(t, base+tt.reqURL, map[string]string{})
-			assert.NilError(t, err, httpRequestError)
-			resp := &MockResponseWriter{}
-			redirectDebug(resp, req)
-			assert.Equal(t, resp.statusCode, code, "expected moved permanently status")
-			loc := resp.Header().Get("Location")
-			assert.Assert(t, loc != "", "expected redirect header to be set")
-			assert.Assert(t, strings.HasSuffix(loc, tt.redirect), "expected redirect to debug")
-			assert.Assert(t, strings.Contains(string(resp.outputBytes), http.StatusText(code)))
-		})
-	}
 }
 
 func TestSetMaxRESTResponseSize(t *testing.T) {

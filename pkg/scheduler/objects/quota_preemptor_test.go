@@ -112,7 +112,7 @@ func TestQuotaChangeFilterVictims(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			asks := prepareAllocationAsks(t, node)
-			assignAllocationsToQueue(asks, leaf)
+			assignAllocationsToQueue(t, asks, leaf)
 			if tc.irrelevantAllocations[0] {
 				asks[0].SetRequiredNode("node2")
 				asks[1].SetRequiredNode("node2")
@@ -227,7 +227,7 @@ func TestQuotaChangeTryPreemption(t *testing.T) {
 			leaf.maxResource = tc.oldMax
 			leaf.guaranteedResource = tc.guaranteed
 			asks := tc.victims
-			assignAllocationsToQueue(asks, leaf)
+			assignAllocationsToQueue(t, asks, leaf)
 			leaf.maxResource = tc.newMax
 			leaf.guaranteedResource = tc.guaranteed
 			preemptor := NewQuotaPreemptor(tc.queue)
@@ -356,7 +356,7 @@ func TestQuotaChangeTryPreemptionWithDifferentResTypes(t *testing.T) {
 				leaf.maxResource = tc.oldMax
 				leaf.guaranteedResource = tc.guaranteed
 				asks := v.allocs
-				assignAllocationsToQueue(asks, leaf)
+				assignAllocationsToQueue(t, asks, leaf)
 				leaf.maxResource = tc.newMax
 				leaf.guaranteedResource = tc.guaranteed
 				preemptor := NewQuotaPreemptor(tc.queue)
@@ -512,6 +512,83 @@ func TestQuotaChangeGetChildQueuesPreemptableResourceWithDifferentResTypes(t *te
 	}
 }
 
+func TestGetChildQueuesPreemptableResource_UnderGuaranteedAndUnguaranteedTypes(t *testing.T) {
+	testCases := []struct {
+		name              string
+		child1Guaranteed  map[string]string
+		child1Allocated   map[string]resources.Quantity
+		child2Guaranteed  map[string]string
+		child2Allocated   map[string]resources.Quantity
+		parentPreemptable map[string]resources.Quantity
+		expectedChild1    map[string]resources.Quantity
+		expectedChild2    map[string]resources.Quantity
+	}{
+		{
+			name:              "under-guaranteed resource is not treated as preemptable",
+			child1Guaranteed:  map[string]string{"cpu": "10", "memory": "100"},
+			child1Allocated:   map[string]resources.Quantity{"cpu": 40, "memory": 20},
+			child2Guaranteed:  map[string]string{"cpu": "10", "memory": "10"},
+			child2Allocated:   map[string]resources.Quantity{"cpu": 40, "memory": 50},
+			parentPreemptable: map[string]resources.Quantity{"cpu": 20, "memory": 20},
+			expectedChild1:    map[string]resources.Quantity{"cpu": 10},
+			expectedChild2:    map[string]resources.Quantity{"cpu": 10, "memory": 20},
+		},
+		{
+			name:              "unguaranteed resource type is preemptable when guaranteed is set",
+			child1Guaranteed:  map[string]string{"cpu": "10"},
+			child1Allocated:   map[string]resources.Quantity{"cpu": 40, "gpu": 30},
+			child2Guaranteed:  map[string]string{"cpu": "10"},
+			child2Allocated:   map[string]resources.Quantity{"cpu": 40, "gpu": 30},
+			parentPreemptable: map[string]resources.Quantity{"cpu": 20, "gpu": 20},
+			expectedChild1:    map[string]resources.Quantity{"cpu": 10, "gpu": 10},
+			expectedChild2:    map[string]resources.Quantity{"cpu": 10, "gpu": 10},
+		},
+		{
+			name:              "child meeting guaranteed is not skipped when using unguaranteed resource",
+			child1Guaranteed:  map[string]string{"cpu": "10"},
+			child1Allocated:   map[string]resources.Quantity{"cpu": 10, "gpu": 30},
+			child2Guaranteed:  map[string]string{"cpu": "10"},
+			child2Allocated:   map[string]resources.Quantity{"cpu": 40, "gpu": 30},
+			parentPreemptable: map[string]resources.Quantity{"cpu": 20, "gpu": 20},
+			expectedChild1:    map[string]resources.Quantity{"gpu": 10},
+			expectedChild2:    map[string]resources.Quantity{"cpu": 20, "gpu": 10},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			parent, err := NewConfiguredQueue(configs.QueueConfig{Name: "parent", Parent: true}, nil, false, nil)
+			assert.NilError(t, err)
+
+			child1, err := NewConfiguredQueue(configs.QueueConfig{
+				Name:      "child1",
+				Resources: configs.Resources{Guaranteed: tc.child1Guaranteed},
+			}, parent, false, nil)
+			assert.NilError(t, err)
+			child1.allocatedResource = resources.NewResourceFromMap(tc.child1Allocated)
+
+			child2, err := NewConfiguredQueue(configs.QueueConfig{
+				Name:      "child2",
+				Resources: configs.Resources{Guaranteed: tc.child2Guaranteed},
+			}, parent, false, nil)
+			assert.NilError(t, err)
+			child2.allocatedResource = resources.NewResourceFromMap(tc.child2Allocated)
+
+			parentPreemptable := resources.NewResourceFromMap(tc.parentPreemptable)
+			childQueues := make(map[*Queue]*QuotaPreemptionContext)
+			getChildQueuesPreemptableResource(parent, parentPreemptable, childQueues)
+
+			expected1 := resources.NewResourceFromMap(tc.expectedChild1)
+			expected2 := resources.NewResourceFromMap(tc.expectedChild2)
+			assert.Equal(t, len(childQueues), 2)
+			assert.Assert(t, resources.Equals(childQueues[child1].preemptableResource, expected1),
+				"child1 expected %v, got %v", expected1, childQueues[child1].preemptableResource)
+			assert.Assert(t, resources.Equals(childQueues[child2].preemptableResource, expected2),
+				"child2 expected %v, got %v", expected2, childQueues[child2].preemptableResource)
+		})
+	}
+}
+
 func TestQuotaChangeTryPreemptionForParentQueue(t *testing.T) {
 	events.Init()
 	eventSystem := events.GetEventSystem().(*events.EventSystemImpl) //nolint:errcheck
@@ -609,7 +686,7 @@ func TestQuotaChangeTryPreemptionForParentQueue(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.queue.maxResource = tc.oldMax
 			for q, v := range tc.victims {
-				assignAllocationsToQueue(v, q)
+				assignAllocationsToQueue(t, v, q)
 			}
 			tc.queue.maxResource = tc.newMax
 			tc.queue.guaranteedResource = tc.newMax

@@ -21,21 +21,19 @@ package objects
 import (
 	"fmt"
 	"strings"
-	"sync"
 
 	"go.uber.org/zap"
 
 	"github.com/apache/yunikorn-core/pkg/log"
-	"github.com/apache/yunikorn-scheduler-interface/lib/go/api"
-	"github.com/apache/yunikorn-scheduler-interface/lib/go/si"
 )
 
 type predicateCheckResult struct {
-	allocationKey string
-	nodeID        string
-	success       bool
-	index         int
-	victims       []*Allocation
+	allocationKey   string
+	nodeID          string
+	success         bool
+	index           int
+	victims         []*Allocation
+	predicateErrors map[string]int32
 }
 
 func (pcr *predicateCheckResult) betterThan(other *predicateCheckResult, allocationsByNode map[string][]*Allocation) bool {
@@ -111,40 +109,6 @@ func (pcr *predicateCheckResult) populateVictims(victimsByNode map[string][]*All
 		victim := victimList[i]
 		pcr.victims = append(pcr.victims, victim)
 	}
-}
-
-// preemptPredicateCheck performs a single predicate check and reports the resultType on a channel
-func preemptPredicateCheck(plugin api.ResourceManagerCallback, ch chan<- *predicateCheckResult, wg *sync.WaitGroup, args *si.PreemptionPredicatesArgs) {
-	defer wg.Done()
-	result := &predicateCheckResult{
-		allocationKey: args.AllocationKey,
-		nodeID:        args.NodeID,
-		success:       false,
-		index:         -1,
-	}
-	if len(args.PreemptAllocationKeys) == 0 {
-		// normal check; there are sufficient resources to run on this node
-		if err := plugin.Predicates(&si.PredicatesArgs{
-			AllocationKey: args.AllocationKey,
-			NodeID:        args.NodeID,
-			Allocate:      true,
-		}); err == nil {
-			result.success = true
-			result.index = -1
-		} else {
-			log.Log(log.SchedPreemption).Debug("Normal predicate check failed",
-				zap.String("AllocationKey", args.AllocationKey),
-				zap.String("NodeID", args.NodeID),
-				zap.Error(err))
-		}
-	} else if response := plugin.PreemptionPredicates(args); response != nil {
-		// preemption check; at least one allocation will need preemption
-		result.success = response.GetSuccess()
-		if result.success {
-			result.index = int(response.GetIndex())
-		}
-	}
-	ch <- result
 }
 
 func (p *predicateCheckResult) String() string {

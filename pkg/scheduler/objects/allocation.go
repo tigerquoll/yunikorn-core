@@ -31,6 +31,7 @@ import (
 	"github.com/apache/yunikorn-core/pkg/events"
 	"github.com/apache/yunikorn-core/pkg/locking"
 	"github.com/apache/yunikorn-core/pkg/log"
+	"github.com/apache/yunikorn-core/pkg/plugins"
 	schedEvt "github.com/apache/yunikorn-core/pkg/scheduler/objects/events"
 	siCommon "github.com/apache/yunikorn-scheduler-interface/lib/go/common"
 	"github.com/apache/yunikorn-scheduler-interface/lib/go/si"
@@ -619,4 +620,27 @@ func (a *Allocation) IsPreemptable() bool {
 
 func (a *Allocation) GetAllocationName() string {
 	return a.tags[siCommon.DomainYuniKorn+siCommon.KeyPodName]
+}
+
+func (a *Allocation) preAllocateConditions(allocate bool) (map[string]*si.Empty, bool) {
+	var prefilterResult *si.PreFilterPredicatesResponse
+	if plugin := plugins.GetResourceManagerCallbackPlugin(); plugin != nil {
+		if prefilterResult = plugin.PreFilterPredicates(&si.PreFilterPredicatesArgs{
+			AllocationKey: a.allocationKey,
+			Allocate:      allocate,
+		}); prefilterResult != nil && !prefilterResult.Success {
+			predicateErr := prefilterResult.GetErrorMessage()
+			log.Log(log.SchedNode).Debug("running prefilter predicates failed",
+				zap.String("allocationKey", a.allocationKey),
+				zap.Bool("allocate", allocate),
+				zap.String("predicate error", predicateErr))
+			a.LogAllocationFailure(predicateErr, allocate)
+			podPredicateErrors := make(map[string]int, 1)
+			podPredicateErrors[predicateErr]++
+			a.SendPredicatesFailedEvent(podPredicateErrors)
+			return prefilterResult.GetFeasibleNodes(), false
+		}
+	}
+	// all predicate plugins passed
+	return prefilterResult.GetFeasibleNodes(), true
 }

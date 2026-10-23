@@ -66,9 +66,6 @@ const (
 	AppStateActive    = "active"
 	AppStateRejected  = "rejected"
 	AppStateCompleted = "completed"
-
-	WSBase    = "/ws/v1"
-	DebugBase = "/debug"
 )
 
 var allowedActiveStatusMsg string
@@ -109,22 +106,6 @@ func init() {
 		maxRESTResponseSize.Store(newSize)
 	})
 	maxRESTResponseSize.Store(configs.DefaultRESTResponseSize)
-}
-
-// redirectDebug redirect calls that used to be part of "/ws/v1" to "/debug"
-// Moving the URl permanently for requests that should not have been part of the standard list
-func redirectDebug(w http.ResponseWriter, r *http.Request) {
-	code := http.StatusMovedPermanently
-	// replace the path: we know we have the right URL as the router would not have called this
-	r.URL.Path = strings.Replace(r.URL.Path, WSBase, DebugBase, 1)
-	redirect := r.URL.String()
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Location", redirect)
-	w.WriteHeader(code)
-	// do as recommended in the RFC 7321, 6.4.2
-	body := "<a href=\"" + redirect + "\">" + http.StatusText(code) + "</a>.\n"
-	//nolint:gosec // safe to ignore, body contains server side output and is not based on user input
-	_, _ = fmt.Fprintln(w, body)
 }
 
 func getStackInfo(w http.ResponseWriter, r *http.Request) {
@@ -362,28 +343,29 @@ func getApplicationDAO(app *objects.Application) *dao.ApplicationDAOInfo {
 	}
 
 	return &dao.ApplicationDAOInfo{
-		ApplicationID:      app.ApplicationID,
-		UsedResource:       app.GetAllocatedResource().DAOMap(),
-		MaxUsedResource:    app.GetMaxAllocatedResource().DAOMap(),
-		PendingResource:    app.GetPendingResource().DAOMap(),
-		Partition:          common.GetPartitionNameWithoutClusterID(app.Partition),
-		QueueName:          app.GetQueuePath(),
-		SubmissionTime:     app.GetSubmissionTime().UnixNano(),
-		FinishedTime:       common.ZeroTimeInUnixNano(app.FinishedTime()),
-		Requests:           getAllocationAsksDAO(app.GetAllRequests()),
-		Allocations:        getAllocationsDAO(app.GetAllAllocations()),
-		State:              app.CurrentState(),
-		User:               app.GetUser().User,
-		Groups:             app.GetUser().Groups,
-		RejectedMessage:    app.GetRejectedMessage(),
-		PlaceholderData:    getPlaceholdersDAO(app.GetAllPlaceholderData()),
-		StateLog:           getStatesDAO(app.GetStateLog()),
-		HasReserved:        app.HasReserved(),
-		Reservations:       app.GetReservations(),
-		MaxRequestPriority: app.GetAskMaxPriority(),
-		StartTime:          app.StartTime().UnixMilli(),
-		ResourceHistory:    resHistory,
-		BackoffDeadline:    common.ZeroTimeInUnixNano(app.GetBackoffDeadline()),
+		ApplicationID:           app.ApplicationID,
+		UsedResource:            app.GetAllocatedResource().DAOMap(),
+		PlaceholderUsedResource: app.GetPlaceholderResource().DAOMap(),
+		MaxUsedResource:         app.GetMaxAllocatedResource().DAOMap(),
+		PendingResource:         app.GetPendingResource().DAOMap(),
+		Partition:               common.GetPartitionNameWithoutClusterID(app.Partition),
+		QueueName:               app.GetQueuePath(),
+		SubmissionTime:          app.GetSubmissionTime().UnixNano(),
+		FinishedTime:            common.ZeroTimeInUnixNano(app.FinishedTime()),
+		Requests:                getAllocationAsksDAO(app.GetAllRequests()),
+		Allocations:             getAllocationsDAO(app.GetAllAllocations()),
+		State:                   app.CurrentState(),
+		User:                    app.GetUser().User,
+		Groups:                  app.GetUser().Groups,
+		RejectedMessage:         app.GetRejectedMessage(),
+		PlaceholderData:         getPlaceholdersDAO(app.GetAllPlaceholderData()),
+		StateLog:                getStatesDAO(app.GetStateLog()),
+		HasReserved:             app.HasReserved(),
+		Reservations:            app.GetReservations(),
+		MaxRequestPriority:      app.GetAskMaxPriority(),
+		StartTime:               app.StartTime().UnixMilli(),
+		ResourceHistory:         resHistory,
+		BackoffDeadline:         common.ZeroTimeInUnixNano(app.GetBackoffDeadline()),
 	}
 }
 
