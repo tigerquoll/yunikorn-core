@@ -27,17 +27,24 @@ import (
 	"github.com/apache/yunikorn-core/pkg/webservice/dao"
 )
 
+// +lockclass:GroupTracker
 type GroupTracker struct {
-	groupName    string            // Name of the group for which usage is being tracked upon
+	groupName string // Name of the group for which usage is being tracked upon
+	// +checklocks:RWMutex
 	applications map[string]string // Hold applications currently run by all users belong to this group
-	queueTracker *QueueTracker     // Holds the actual resource usage of queue path where application run
-	events       *ugmEvents
+	// The queue tracker itself is lock free, it relies on the lock of this tracker, so the
+	// lock has to be held to reach any of the usage it holds.
+	// +checklocks:RWMutex
+	queueTracker *QueueTracker // Holds the actual resource usage of queue path where application run
+	events       *ugmEvents    // set on creation and never changed, no lock needed
 
 	locking.RWMutex
 }
 
 func newGroupTracker(groupName string, events *ugmEvents) *GroupTracker {
-	queueTracker := newRootQueueTracker(group)
+	// wild card limits are only ever applied to user trackers, so the group side passes a nil
+	// map down to every queue tracker it creates
+	queueTracker := newRootQueueTracker(group, nil)
 	groupTracker := &GroupTracker{
 		groupName:    groupName,
 		applications: make(map[string]string),
@@ -55,7 +62,7 @@ func (gt *GroupTracker) increaseTrackedResource(queuePath, applicationID string,
 	defer gt.Unlock()
 	gt.events.sendIncResourceUsageForGroup(gt.groupName, queuePath, usage)
 	gt.applications[applicationID] = user
-	gt.queueTracker.increaseTrackedResource(strings.Split(queuePath, configs.DOT), applicationID, group, usage)
+	gt.queueTracker.increaseTrackedResource(strings.Split(queuePath, configs.DOT), applicationID, group, usage, nil)
 }
 
 func (gt *GroupTracker) decreaseTrackedResource(queuePath, applicationID string, usage *resources.Resource, removeApp bool) bool {
@@ -81,14 +88,14 @@ func (gt *GroupTracker) setLimits(queuePath string, resource *resources.Resource
 	gt.Lock()
 	defer gt.Unlock()
 	gt.events.sendLimitSetForGroup(gt.groupName, queuePath)
-	gt.queueTracker.setLimit(strings.Split(queuePath, configs.DOT), resource, maxApps, false, group, false)
+	gt.queueTracker.setLimit(strings.Split(queuePath, configs.DOT), resource, maxApps, false, group, false, nil)
 }
 
 func (gt *GroupTracker) clearLimits(queuePath string) {
 	gt.Lock()
 	defer gt.Unlock()
 	gt.events.sendLimitRemoveForGroup(gt.groupName, queuePath)
-	gt.queueTracker.setLimit(strings.Split(queuePath, configs.DOT), nil, 0, false, group, false)
+	gt.queueTracker.setLimit(strings.Split(queuePath, configs.DOT), nil, 0, false, group, false, nil)
 }
 
 // headroom calculate the resource headroom for the group in the hierarchy defined
@@ -97,7 +104,7 @@ func (gt *GroupTracker) clearLimits(queuePath string) {
 func (gt *GroupTracker) headroom(hierarchy []string) *resources.Resource {
 	gt.Lock()
 	defer gt.Unlock()
-	return gt.queueTracker.headroom(hierarchy, group)
+	return gt.queueTracker.headroom(hierarchy, group, nil)
 }
 
 // GetResourceUsageDAOInfo returns the DAO object used in the REST API for this group tracker
@@ -161,7 +168,7 @@ func (gt *GroupTracker) decreaseAllTrackedResourceUsage(hierarchy []string) map[
 func (gt *GroupTracker) canRunApp(hierarchy []string, applicationID string) bool {
 	gt.Lock()
 	defer gt.Unlock()
-	return gt.queueTracker.canRunApp(hierarchy, applicationID, group)
+	return gt.queueTracker.canRunApp(hierarchy, applicationID, group, nil)
 }
 
 // GetMaxResources returns a map of the maxResources for all queues registered under this group tracker.
@@ -189,4 +196,11 @@ func (gt *GroupTracker) getUsedResources() map[string]*resources.Resource {
 	gt.RLock()
 	defer gt.RUnlock()
 	return gt.queueTracker.getUsedResources()
+}
+
+// getResourceUsage returns an independent snapshot of the root queue usage.
+func (gt *GroupTracker) getResourceUsage() *resources.Resource {
+	gt.RLock()
+	defer gt.RUnlock()
+	return gt.queueTracker.resourceUsage.Clone()
 }

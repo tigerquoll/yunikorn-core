@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -468,7 +469,12 @@ func TestPlaceholderDataWithPlaceholderPreemption(t *testing.T) {
 	for i := 1; i <= 6; i++ {
 		// add an ask for a placeholder and allocate
 		lastPh = phID + strconv.Itoa(i)
-		ask := newAllocationAskTG(lastPh, appID2, taskGroup, res, true)
+		// age is compared at hour granularity: make the last placeholder the youngest
+		var tags map[string]string
+		if i < 6 {
+			tags = map[string]string{siCommon.CreationTime: strconv.FormatInt(time.Now().Add(-time.Hour).Unix(), 10)}
+		}
+		ask := newAllocationAskAll(lastPh, appID2, taskGroup, res, 1, true, tags)
 		err = gangApp.AddAllocationAsk(ask)
 		assert.NilError(t, err, "failed to add placeholder ask %s to app1", lastPh)
 		// try to allocate a placeholder via normal allocate
@@ -596,7 +602,7 @@ func TestPlaceholderDataWithNodeRemoval(t *testing.T) {
 
 	for i := 1; i <= 6; i++ {
 		// add an ask for a placeholder and allocate
-		ask := newAllocationAskTG(phID+strconv.Itoa(i+1), appID2, taskGroup, res, true)
+		ask := newAllocationAskTG(phID+strconv.Itoa(i), appID2, taskGroup, res, true)
 		err = gangApp.AddAllocationAsk(ask)
 		assert.NilError(t, err, "failed to add placeholder ask ph-1 to app1")
 		// try to allocate a placeholder via normal allocate
@@ -685,7 +691,7 @@ func TestPlaceholderDataWithRemoval(t *testing.T) {
 	var lastPhAllocationKey string
 	for i := 1; i <= 6; i++ {
 		// add an ask for a placeholder and allocate
-		ask := newAllocationAskTG(phID+strconv.Itoa(i+1), appID2, taskGroup, res, true)
+		ask := newAllocationAskTG(phID+strconv.Itoa(i), appID2, taskGroup, res, true)
 		err = gangApp.AddAllocationAsk(ask)
 		assert.NilError(t, err, "failed to add placeholder ask ph-1 to app1")
 		// try to allocate a placeholder via normal allocate
@@ -2924,6 +2930,123 @@ func TestCleanupRejectedApps(t *testing.T) {
 	assert.Equal(t, 0, len(partition.getRejectedAppsByState(objects.Expired.String())), "the partition should have 0 expired app")
 }
 
+func TestAddRejectedApplicationConcurrent(t *testing.T) {
+	partition, err := newBasePartition()
+	assert.NilError(t, err, "partition create failed")
+	defer partition.userGroupCache.Stop()
+
+	var wg sync.WaitGroup
+	numGoroutines := 20
+	appsPerGoroutine := 10
+	start := make(chan struct{})
+
+	// Concurrent Writers
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+			<-start
+			for j := 0; j < appsPerGoroutine; j++ {
+				appID := fmt.Sprintf("app-%d-%d", workerID, j)
+				app := newApplication(appID, "default", defQueue)
+				partition.AddRejectedApplication(app, "rejected reason")
+			}
+		}(i)
+	}
+
+	// Concurrent Readers
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+			<-start
+			for j := 0; j < appsPerGoroutine; j++ {
+				_ = partition.GetRejectedApplications()
+				appID := fmt.Sprintf("app-%d-%d", workerID, j)
+				_ = partition.getRejectedApplication(appID)
+				_ = partition.getRejectedAppsByState(objects.Rejected.String())
+			}
+		}(i)
+	}
+
+	close(start)
+	wg.Wait()
+	assert.Equal(t, numGoroutines*appsPerGoroutine, len(partition.GetRejectedApplications()), "all rejected applications should be tracked")
+}
+
+func TestAddRejectedApplicationConcurrentWithCleanup(t *testing.T) {
+	partition, err := newBasePartition()
+	assert.NilError(t, err, "partition create failed")
+	defer partition.userGroupCache.Stop()
+
+	var wg sync.WaitGroup
+	numGoroutines := 20
+	appsPerGoroutine := 10
+	start := make(chan struct{})
+
+	// Concurrent Writers
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+			<-start
+			for j := 0; j < appsPerGoroutine; j++ {
+				appID := fmt.Sprintf("cleanup-app-%d-%d", workerID, j)
+				app := newApplication(appID, "default", defQueue)
+				partition.AddRejectedApplication(app, "rejected reason")
+				if j%2 == 0 {
+					app.SetState(objects.Expired.String())
+				}
+			}
+		}(i)
+	}
+
+	// Concurrent Cleaners and Readers
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for j := 0; j < appsPerGoroutine; j++ {
+				partition.cleanupExpiredApps()
+				_ = partition.GetRejectedApplications()
+				_ = partition.getRejectedAppsByState(objects.Expired.String())
+				_ = partition.getRejectedAppsByState(objects.Rejected.String())
+			}
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+	partition.cleanupExpiredApps()
+	assert.Equal(t, 0, len(partition.getRejectedAppsByState(objects.Expired.String())), "no expired apps should remain after cleanup")
+}
+
+func TestAddRejectedApplicationDuplicate(t *testing.T) {
+	partition, err := newBasePartition()
+	assert.NilError(t, err, "partition create failed")
+	defer partition.userGroupCache.Stop()
+
+	var wg sync.WaitGroup
+	numGoroutines := 20
+	appID := "duplicate-app"
+	start := make(chan struct{})
+
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			app := newApplication(appID, "default", defQueue)
+			partition.AddRejectedApplication(app, "duplicate rejected reason")
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+	assert.Equal(t, 1, len(partition.GetRejectedApplications()), "duplicate rejected app should only have 1 entry")
+}
+
 func TestUpdateNode(t *testing.T) {
 	partition, err := newBasePartition()
 	assert.NilError(t, err, "test partition create failed with error")
@@ -3649,10 +3772,10 @@ func TestFailReplacePlaceholder(t *testing.T) {
 		t.Fatalf("empty cluster placeholder allocate returned allocation: %s", result)
 	}
 	// plugin to let the pre-check fail on node-1 only, means we cannot replace the placeholder
-	plugin := mock.NewPredicatePlugin(false, map[string]int{nodeID1: -1})
+	plugin := mock.NewPredicatePlugin(false, false, map[string]int{nodeID1: 0, nodeID2: 1})
 	plugins.RegisterSchedulerPlugin(plugin)
 	defer func() {
-		passPlugin := mock.NewPredicatePlugin(false, nil)
+		passPlugin := mock.NewPredicatePlugin(false, false, map[string]int{nodeID1: 0, nodeID2: 1})
 		plugins.RegisterSchedulerPlugin(passPlugin)
 	}()
 	var tgRes, res *resources.Resource
@@ -5328,7 +5451,8 @@ func TestAppSchedulingOrderFIFO(t *testing.T) {
 		resources.NewResourceFromMap(map[string]resources.Quantity{"first": 1}), 0, false, map[string]string{
 			siCommon.CreationTime: "30", // older than app2Ask2 (alloc-3)
 		})
-	app1.AddAllocation(allocExisting)
+	err = app1.AddAllocation(allocExisting)
+	assert.NilError(t, err)
 
 	// should schedule from app-1
 	alloc = partition.tryAllocate()
@@ -5599,4 +5723,64 @@ func TestRemoveAppWithReservations(t *testing.T) {
 	// remove the application - reservation count must be decremented
 	partition.removeApplication(appID1)
 	assert.Equal(t, 0, partition.getReservationCount())
+}
+
+func TestRemoveAllocationPlaceholderReplacedWithoutReplacement(t *testing.T) {
+	setupUGM()
+	partition, err := newBasePartition()
+	assert.NilError(t, err, "partition create failed")
+	defer partition.userGroupCache.Stop()
+
+	// add a new app
+	app := newApplication(appID1, "default", defQueue)
+	err = partition.AddApplication(app)
+	assert.NilError(t, err, "add application to partition should not have failed")
+
+	// add a node with placeholder allocation
+	nodeRes := resources.NewResourceFromMap(map[string]resources.Quantity{"first": 10})
+	node1 := newNodeMaxResource(nodeID1, nodeRes)
+	appRes := resources.NewResourceFromMap(map[string]resources.Quantity{"first": 1})
+	ph := newAllocationTG("placeholder", appID1, nodeID1, taskGroup, appRes, true)
+	err = partition.AddNode(node1)
+	assert.NilError(t, err)
+	_, allocCreated, err := partition.UpdateAllocation(ph)
+	assert.NilError(t, err)
+	assert.Check(t, allocCreated)
+	assert.Equal(t, 1, partition.GetTotalAllocationCount())
+	assert.Assert(t, resources.Equals(partition.GetQueue(defQueue).GetAllocatedResource(), appRes))
+
+	// Release with PLACEHOLDER_REPLACED when no replacement was ever linked (ph.GetRelease() == nil)
+	release := &si.AllocationRelease{
+		PartitionName:   partition.Name,
+		ApplicationID:   appID1,
+		AllocationKey:   "placeholder",
+		TerminationType: si.TerminationType_PLACEHOLDER_REPLACED,
+	}
+
+	released, confirmed := partition.removeAllocation(release)
+	assert.Assert(t, confirmed == nil, "confirmed allocation should be nil when no replacement exists")
+	assert.Equal(t, 1, len(released), "placeholder should be in released list")
+	assert.Equal(t, 0, partition.GetTotalAllocationCount(), "allocation count should be 0 after placeholder removed")
+	assert.Assert(t, node1.GetAllocation("placeholder") == nil, "placeholder should be removed from node")
+	assert.Assert(t, resources.IsZero(partition.GetQueue(defQueue).GetAllocatedResource()), "queue resource should be zero after placeholder removed")
+}
+
+func TestPartitionStates(t *testing.T) {
+	p := createPartitionContext(t)
+	err := p.handlePartitionEvent(objects.Stop)
+	if err != nil || !p.isStopped() {
+		t.Errorf("partition is not marked stopped: %v", err)
+	}
+	err = p.handlePartitionEvent(objects.Start)
+	if err != nil || !p.IsRunning() {
+		t.Errorf("partition is not marked running: %v", err)
+	}
+	err = p.handlePartitionEvent(objects.Remove)
+	if err != nil || !p.isDraining() {
+		t.Errorf("partition is not marked draining: %v", err)
+	}
+	err = p.handlePartitionEvent(objects.Start)
+	if err != nil || !p.IsRunning() {
+		t.Errorf("partition is not marked running: %v", err)
+	}
 }

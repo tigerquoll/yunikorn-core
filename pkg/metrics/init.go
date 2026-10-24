@@ -33,6 +33,10 @@ const (
 	EventSubsystem = "event"
 	// MetricNameInvalidByteReplacement byte used to replace invalid bytes in prometheus metric names
 	MetricNameInvalidByteReplacement = '_'
+
+	StateLabel  = "state"
+	LevelLabel  = "level"
+	ResultLabel = "result"
 )
 
 var once sync.Once
@@ -40,10 +44,11 @@ var m *Metrics
 
 type Metrics struct {
 	scheduler *SchedulerMetrics
-	queues    map[string]*QueueMetrics
-	event     *EventMetrics
-	runtime   *RuntimeMetrics
-	lock      locking.RWMutex
+	// +checklocks:lock
+	queues  map[string]*QueueMetrics
+	event   *EventMetrics
+	runtime *RuntimeMetrics
+	lock    locking.RWMutex
 }
 
 func init() {

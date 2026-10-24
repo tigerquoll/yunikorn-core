@@ -41,6 +41,7 @@ const (
 	AppCompleting = "completing"
 	AppCompleted  = "completed"
 	AppExpired    = "expired"
+	AppRevived    = "revived"
 
 	ContainerReleased  = "released"
 	ContainerAllocated = "allocated"
@@ -60,6 +61,7 @@ type QueueMetrics struct {
 	containerMetrics     *prometheus.CounterVec
 	resourceMetricsLabel *prometheus.GaugeVec
 	// Track known resource types
+	// +checklocks:lock
 	knownResourceTypes map[string]struct{}
 	lock               locking.Mutex
 }
@@ -75,8 +77,8 @@ func InitQueueMetrics(name string) *QueueMetrics {
 			Namespace:   Namespace,
 			Name:        "queue_app",
 			ConstLabels: prometheus.Labels{"queue": name},
-			Help:        "Queue application metrics. State of the application includes `new`, `accepted`, `rejected`, `running`, `failing`, `failed`, `resuming`, `completing`, `completed`.",
-		}, []string{"state"})
+			Help:        "Queue application metrics. State of the application includes `new`, `accepted`, `rejected`, `running`, `failing`, `failed`, `resuming`, `completing`, `completed`, `revived`.",
+		}, []string{StateLabel})
 
 	q.containerMetrics = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
@@ -84,7 +86,7 @@ func InitQueueMetrics(name string) *QueueMetrics {
 			Subsystem: replaceStr,
 			Name:      "queue_container",
 			Help:      "Queue container metrics. State of the attempt includes `allocated`, `released`.",
-		}, []string{"state"})
+		}, []string{StateLabel})
 
 	q.resourceMetricsLabel = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
@@ -92,7 +94,7 @@ func InitQueueMetrics(name string) *QueueMetrics {
 			Name:        "queue_resource",
 			ConstLabels: prometheus.Labels{"queue": name},
 			Help:        "Queue resource metrics. State of the resource includes `guaranteed`, `max`, `allocated`, `pending`, `preempting`, `maxRunningApps`.",
-		}, []string{"state", "resource"})
+		}, []string{StateLabel, "resource"})
 
 	q.appTerminalMetrics = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
@@ -100,7 +102,7 @@ func InitQueueMetrics(name string) *QueueMetrics {
 			Name:        "queue_app_total",
 			ConstLabels: prometheus.Labels{"queue": name},
 			Help:        "Total number of applications that reached a terminal state. State includes `completed`, `failed`, `rejected`.",
-		}, []string{"state"})
+		}, []string{StateLabel})
 
 	var queueMetricsList = []prometheus.Collector{
 		q.appMetrics,
@@ -306,9 +308,34 @@ func (m *QueueMetrics) IncQueueApplicationsCompleted() {
 	m.incQueueApplications(AppCompleted)
 }
 
+// DecQueueApplicationsCompleted reverses IncQueueApplicationsCompleted when a completed application
+// is revived.
+func (m *QueueMetrics) DecQueueApplicationsCompleted() {
+	m.decQueueApplications(AppCompleted)
+}
+
 func (m *QueueMetrics) GetQueueApplicationsCompleted() (int, error) {
 	metricDto := &dto.Metric{}
 	err := m.appMetrics.WithLabelValues(AppCompleted).Write(metricDto)
+	if err == nil {
+		return int(*metricDto.Gauge.Value), nil
+	}
+	return -1, err
+}
+
+// IncQueueApplicationsRevived counts an application brought back out of the Completed state.
+func (m *QueueMetrics) IncQueueApplicationsRevived() {
+	m.incQueueApplications(AppRevived)
+}
+
+// DecQueueApplicationsRevived is called when a revived application completes again.
+func (m *QueueMetrics) DecQueueApplicationsRevived() {
+	m.decQueueApplications(AppRevived)
+}
+
+func (m *QueueMetrics) GetQueueApplicationsRevived() (int, error) {
+	metricDto := &dto.Metric{}
+	err := m.appMetrics.WithLabelValues(AppRevived).Write(metricDto)
 	if err == nil {
 		return int(*metricDto.Gauge.Value), nil
 	}

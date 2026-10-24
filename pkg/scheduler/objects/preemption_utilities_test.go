@@ -137,7 +137,7 @@ func removeAllocationAsks(node *Node, asks []*Allocation) {
 	}
 }
 
-func assignAllocationsToQueue(allocations []*Allocation, queue *Queue) {
+func assignAllocationsToQueue(t *testing.T, allocations []*Allocation, queue *Queue) {
 	for _, allocation := range allocations {
 		var app *Application
 		var ok bool
@@ -148,7 +148,8 @@ func assignAllocationsToQueue(allocations []*Allocation, queue *Queue) {
 		} else {
 			app = queue.applications[allocation.applicationID]
 		}
-		app.AddAllocation(allocation)
+		err := app.AddAllocation(allocation)
+		assert.NilError(t, err)
 		queue.IncAllocatedResource(allocation.GetAllocatedResource(), false)
 	}
 }
@@ -163,56 +164,6 @@ func resetQueue(queue *Queue) {
 	for _, child := range queue.GetCopyOfChildren() {
 		resetQueue(child)
 	}
-}
-
-// regular pods
-// ask1: pri - 10, create time - 1, res - 10
-// ask2: pri - 10, create time - 2, res - 8
-// ask3: pri - 15, create time - 3, res - 10
-// ask4: pri - 10, create time - 2, res - 5
-// ask5: pri - 5, create time - 4, res - 5
-
-// opted out pods
-// ask6: pri - 10, create time - 5, res - 10
-// ask7: pri - 10, create time - 2, res - 8
-// ask8: pri - 15, create time - 6, res - 10
-
-// driver/owner pods
-// ask9: pri - 10, create time - 2, res - 5
-// ask10: pri - 5, create time - 4, res - 5
-
-// original asks order: 6, 7, 8, 9, 10, 1, 2, 3, 4, 5
-// expected sorted asks o/p: 5, 1, 4, 2, 3, 6, 7, 8, 10, 9
-func TestSortAllocations(t *testing.T) {
-	node := NewNode(&si.NodeInfo{
-		NodeID:     "node",
-		Attributes: nil,
-		SchedulableResource: &si.Resource{
-			Resources: map[string]*si.Quantity{"first": {Value: 100}},
-		},
-	})
-
-	asks := prepareAllocationAsks(t, node)
-	SortAllocations(asks)
-	sortedAsks := asks
-
-	// assert regular pods
-	assert.Equal(t, sortedAsks[0].GetAllocationKey(), "ask5")
-	assert.Equal(t, sortedAsks[1].GetAllocationKey(), "ask1")
-	assert.Equal(t, sortedAsks[2].GetAllocationKey(), "ask4")
-	assert.Equal(t, sortedAsks[3].GetAllocationKey(), "ask2")
-	assert.Equal(t, sortedAsks[4].GetAllocationKey(), "ask3")
-
-	// assert opted out pods
-	assert.Equal(t, sortedAsks[5].GetAllocationKey(), "ask6")
-	assert.Equal(t, sortedAsks[6].GetAllocationKey(), "ask7")
-	assert.Equal(t, sortedAsks[7].GetAllocationKey(), "ask8")
-
-	// assert driver/owner pods
-	assert.Equal(t, sortedAsks[8].GetAllocationKey(), "ask10")
-	assert.Equal(t, sortedAsks[9].GetAllocationKey(), "ask9")
-
-	removeAllocationAsks(node, asks)
 }
 
 func TestSortAllocationsBasedOnAsk(t *testing.T) {
@@ -293,5 +244,55 @@ func TestSortAllocationsBasedOnAsk(t *testing.T) {
 			}
 			removeAllocationAsks(node, victimAllocations)
 		})
+	}
+}
+
+func TestSortAllocationsBasedOnAsk_PreemptionOrdering(t *testing.T) {
+	node := NewNode(&si.NodeInfo{
+		NodeID: "node1",
+		SchedulableResource: &si.Resource{
+			Resources: map[string]*si.Quantity{"first": {Value: 100}},
+		},
+	})
+	res := resources.NewResourceFromMap(map[string]resources.Quantity{"first": 10})
+	total := resources.NewResourceFromMap(map[string]resources.Quantity{"first": 100})
+	ask := resources.NewResourceFromMap(map[string]resources.Quantity{"first": 10})
+
+	regularPod := createAllocation("regularPod", "app1", node.NodeID, true, false, 10, false, res)
+	originatorPod := createAllocation("originatorPod", "app1", node.NodeID, true, true, 10, false, res)
+	optedOutPod := createAllocation("optedOutPod", "app1", node.NodeID, false, false, 10, false, res)
+	optedOutOriginatorPod := createAllocation("optedOutOriginatorPod", "app1", node.NodeID, false, true, 10, false, res)
+
+	allocations := []*Allocation{optedOutOriginatorPod, optedOutPod, originatorPod, regularPod}
+	SortAllocationsBasedOnAsk(allocations, total, ask)
+
+	assert.Equal(t, allocations[0].GetAllocationKey(), "regularPod")
+	assert.Equal(t, allocations[1].GetAllocationKey(), "optedOutPod")
+	assert.Equal(t, allocations[2].GetAllocationKey(), "originatorPod")
+	assert.Equal(t, allocations[3].GetAllocationKey(), "optedOutOriginatorPod")
+}
+
+func TestSortAllocationsBasedOnAsk_TieBreaking(t *testing.T) {
+	node := NewNode(&si.NodeInfo{
+		NodeID: "node1",
+		SchedulableResource: &si.Resource{
+			Resources: map[string]*si.Quantity{"first": {Value: 100}},
+		},
+	})
+	res := resources.NewResourceFromMap(map[string]resources.Quantity{"first": 10})
+	total := resources.NewResourceFromMap(map[string]resources.Quantity{"first": 100})
+	ask := resources.NewResourceFromMap(map[string]resources.Quantity{"first": 10})
+
+	// Tie-breaking by allocationKey when resource ratios are identical, regardless of creation
+	// time within the same hour bucket and of the input order.
+	allocB := createAllocation("alloc-b", "app1", node.NodeID, true, false, 10, false, res)
+	allocB.createTime = testBaseTime
+	allocA := createAllocation("alloc-a", "app1", node.NodeID, true, false, 10, false, res)
+	allocA.createTime = testBaseTime.Add(-10 * time.Minute)
+
+	for _, allocations := range [][]*Allocation{{allocA, allocB}, {allocB, allocA}} {
+		SortAllocationsBasedOnAsk(allocations, total, ask)
+		assert.Equal(t, allocations[0].GetAllocationKey(), "alloc-a")
+		assert.Equal(t, allocations[1].GetAllocationKey(), "alloc-b")
 	}
 }

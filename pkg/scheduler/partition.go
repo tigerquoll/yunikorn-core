@@ -45,29 +45,39 @@ import (
 	"github.com/apache/yunikorn-scheduler-interface/lib/go/si"
 )
 
+// +lockclass:PartitionContext
+// +checklocksguardedby:RWMutex
 type PartitionContext struct {
+	// +checklocksunguarded
 	RmID string // the RM the partition belongs to
+	// +checklocksunguarded
 	Name string // name of the partition
 
-	// Private fields need protection
-	root                   *objects.Queue                  // start of the queue hierarchy
-	applications           map[string]*objects.Application // applications assigned to this partition
-	completedApplications  map[string]*objects.Application // completed applications from this partition
-	rejectedApplications   map[string]*objects.Application // rejected applications from this partition
-	nodes                  objects.NodeCollection          // nodes assigned to this partition
-	placementManager       *placement.AppPlacementManager  // placement manager for this partition
-	partitionManager       *partitionManager               // manager for this partition
-	stateMachine           *fsm.FSM                        // the state of the partition for scheduling
-	stateTime              time.Time                       // last time the state was updated (needed for cleanup)
-	userGroupCache         *security.UserGroupCache        // user cache per partition
-	totalPartitionResource *resources.Resource             // Total node resources
-	allocations            int                             // Number of allocations on the partition
-	reservations           int                             // number of reservations
-	placeholderAllocations int                             // number of placeholder allocations
-	preemptionEnabled      bool                            // whether preemption is enabled or not
-	quotaPreemptionEnabled bool                            // whether quota preemption is enabled or not
-	foreignAllocs          map[string]*objects.Allocation  // foreign (non-Yunikorn) allocations
-	appQueueMapping        *objects.AppQueueMapping        // appID mapping to queues
+	// +checklocksunguarded
+	root                  *objects.Queue                  // start of the queue hierarchy
+	applications          map[string]*objects.Application // applications assigned to this partition
+	completedApplications map[string]*objects.Application // completed applications from this partition
+	rejectedApplications  map[string]*objects.Application // rejected applications from this partition
+	// +checklocksunguarded
+	nodes objects.NodeCollection // nodes assigned to this partition
+	// +checklocksunguarded
+	placementManager *placement.AppPlacementManager // placement manager for this partition
+	// +checklocksunguarded
+	partitionManager *partitionManager // manager for this partition
+	// +checklocksunguarded
+	stateMachine *fsm.FSM  // the state of the partition for scheduling
+	stateTime    time.Time // last time the state was updated (needed for cleanup)
+	// +checklocksunguarded
+	userGroupCache         *security.UserGroupCache       // user cache per partition
+	totalPartitionResource *resources.Resource            // Total node resources
+	allocations            int                            // Number of allocations on the partition
+	reservations           int                            // number of reservations
+	placeholderAllocations int                            // number of placeholder allocations
+	preemptionEnabled      bool                           // whether preemption is enabled or not
+	quotaPreemptionEnabled bool                           // whether quota preemption is enabled or not
+	foreignAllocs          map[string]*objects.Allocation // foreign (non-Yunikorn) allocations
+	// +checklocksunguarded
+	appQueueMapping *objects.AppQueueMapping // appID mapping to queues
 
 	// The partition write lock must not be held while manipulating an application.
 	// Scheduling is running continuously as a lock free background task. Scheduling an application
@@ -146,7 +156,8 @@ func (pc *PartitionContext) initialPartitionFromConfig(conf configs.PartitionCon
 	// get the user group cache for the partition
 	pc.userGroupCache = security.GetUserGroupCache(conf.UserGroupResolver, security.GetConfigReader(), security.GetLdapAccess())
 	pc.updateNodeSortingPolicy(conf, silence)
-	pc.updatePreemption(conf)
+	// the partition is still being built and cannot be reached yet, so no lock is taken
+	pc.updatePreemption(conf) // +checklocksignore
 
 	// update limit settings: start at the root
 	if !silence {
@@ -155,7 +166,7 @@ func (pc *PartitionContext) initialPartitionFromConfig(conf configs.PartitionCon
 	return nil
 }
 
-// NOTE: this is a lock free call. It should only be called holding the PartitionContext lock.
+// updateNodeSortingPolicy only updates the node collection, which has its own lock; callers do not hold the partition lock.
 // If the silence flag is set to true, the function will not log when setting the node sorting policy.
 func (pc *PartitionContext) updateNodeSortingPolicy(conf configs.PartitionConfig, silence bool) {
 	var configuredPolicy policies.SortingPolicy
@@ -172,6 +183,7 @@ func (pc *PartitionContext) updateNodeSortingPolicy(conf configs.PartitionConfig
 }
 
 // NOTE: this is a lock free call. It should only be called holding the PartitionContext lock.
+// +checklocks:pc.RWMutex
 func (pc *PartitionContext) updatePreemption(conf configs.PartitionConfig) {
 	pc.preemptionEnabled = conf.Preemption.Enabled == nil || *conf.Preemption.Enabled
 	pc.quotaPreemptionEnabled = conf.Preemption.QuotaPreemptionEnabled != nil && *conf.Preemption.QuotaPreemptionEnabled
@@ -233,6 +245,7 @@ func (pc *PartitionContext) addQueue(conf []configs.QueueConfig, parent *objects
 // Update the passed in queues and then do this recursively for the children
 //
 // NOTE: this is a lock free call. It should only be called holding the PartitionContext lock.
+// +checklocks:pc.RWMutex
 func (pc *PartitionContext) updateQueues(config []configs.QueueConfig, parent *objects.Queue) error {
 	// get the name of the passed in queue
 	parentPath := parent.QueuePath + configs.DOT
@@ -287,12 +300,19 @@ func (pc *PartitionContext) markPartitionForRemoval() {
 
 // Get the state of the partition.
 // No new nodes and applications will be accepted if stopped or being removed.
+func (pc *PartitionContext) isStopped() bool {
+	return pc.stateMachine.Current() == objects.Stopped.String()
+}
+
+// Get the state of the partition.
+// No new nodes and applications will be accepted if stopped or being removed.
 func (pc *PartitionContext) isDraining() bool {
 	return pc.stateMachine.Current() == objects.Draining.String()
 }
 
-func (pc *PartitionContext) isStopped() bool {
-	return pc.stateMachine.Current() == objects.Stopped.String()
+// IsRunning returns true if the partition in Active state.
+func (pc *PartitionContext) IsRunning() bool {
+	return pc.stateMachine.Is(objects.Active.String())
 }
 
 // Handle the state event for the partition.
@@ -300,7 +320,8 @@ func (pc *PartitionContext) isStopped() bool {
 func (pc *PartitionContext) handlePartitionEvent(event objects.ObjectEvent) error {
 	err := pc.stateMachine.Event(context.Background(), event.String(), pc.Name)
 	if err == nil {
-		pc.stateTime = time.Now()
+		// YUNIKORN-3410: stateTime written without the partition lock while GetStateTime reads it under the read lock
+		pc.stateTime = time.Now() // +checklocksignore
 		return nil
 	}
 	// handle the same state transition not nil error (limit of fsm).
@@ -310,8 +331,8 @@ func (pc *PartitionContext) handlePartitionEvent(event objects.ObjectEvent) erro
 	return err
 }
 
-// Get the placement manager. The manager could change when we process the configuration changes
-// we thus need to lock.
+// Get the placement manager. The manager is set when the partition is created and never replaced,
+// a configuration change updates the rules on the manager itself.
 func (pc *PartitionContext) getPlacementManager() *placement.AppPlacementManager {
 	pc.RLock()
 	defer pc.RUnlock()
@@ -324,7 +345,7 @@ func (pc *PartitionContext) getPlacementManager() *placement.AppPlacementManager
 // NOTE: this is a lock free call. It must NOT be called holding the PartitionContext lock.
 func (pc *PartitionContext) AddApplication(app *objects.Application) error {
 	if pc.isDraining() || pc.isStopped() {
-		return fmt.Errorf("partition %s is stopped cannot add a new application %s", pc.Name, app.ApplicationID)
+		return fmt.Errorf("partition %s is stopped or draining, cannot add a new application %s", pc.Name, app.ApplicationID)
 	}
 
 	// Check if the app exists
@@ -486,6 +507,140 @@ func (pc *PartitionContext) getRejectedApplication(appID string) *objects.Applic
 	return pc.rejectedApplications[appID]
 }
 
+// getOrReviveApplication returns the application to add work to, bringing it back from the completed
+// list if the shim sent work for it after the core had already finished it. Returns nil when no
+// revivable application exists.
+// NOTE: this is a lock free call. It must NOT be called holding the PartitionContext lock.
+func (pc *PartitionContext) getOrReviveApplication(appID string) *objects.Application {
+	if app := pc.getApplication(appID); app != nil {
+		// moveTerminatedApp unsets the queue before it takes the partition lock, so an app can be
+		// visible here with no queue attached
+		if app.GetQueue() == nil && !pc.restoreAppQueue(app) {
+			return nil
+		}
+		return app
+	}
+	return pc.reviveCompletedApplication(appID)
+}
+
+// reviveCompletedApplication moves the most recently completed generation of appID back into the
+// active application list and re-attaches its queue.
+// NOTE: this is a lock free call. It must NOT be called holding the PartitionContext lock.
+func (pc *PartitionContext) reviveCompletedApplication(appID string) *objects.Application {
+	app := pc.takeCompletedApplication(appID)
+	if app == nil {
+		return nil
+	}
+	if !pc.restoreAppQueue(app) {
+		// no queue to run in: hand it back to the completed list so it is not lost
+		pc.moveTerminatedApp(appID)
+		return nil
+	}
+	log.Log(log.SchedPartition).Info("reviving completed application for new work from the shim",
+		zap.String("partitionName", pc.Name),
+		zap.String("appID", appID),
+		zap.String("queue", app.GetQueuePath()))
+	return app
+}
+
+// takeCompletedApplication removes the latest completed generation of appID from the completed list
+// and returns it. Expired applications are past the point of no return and are left alone.
+func (pc *PartitionContext) takeCompletedApplication(appID string) *objects.Application {
+	pc.Lock()
+	defer pc.Unlock()
+	// completed apps are re-keyed as appID + a negative unix timestamp, so the smallest suffix is
+	// the most recent generation. Compare keys to avoid taking an application lock under this one.
+	var latestKey string
+	latestStamp := int64(math.MaxInt64)
+	for key, completed := range pc.completedApplications {
+		if completed.ApplicationID != appID || completed.IsExpired() {
+			continue
+		}
+		stamp, err := strconv.ParseInt(strings.TrimPrefix(key, appID), 10, 64)
+		if err != nil {
+			continue
+		}
+		if stamp < latestStamp {
+			latestStamp = stamp
+			latestKey = key
+		}
+	}
+	if latestKey == "" {
+		return nil
+	}
+	app := pc.completedApplications[latestKey]
+	delete(pc.completedApplications, latestKey)
+	pc.applications[appID] = app
+	return app
+}
+
+// restoreAppQueue re-attaches a leaf queue to an application that lost it on completion, recreating
+// the queue when it was cleaned up in the meantime. Returns false when no queue can be resolved.
+// NOTE: this is a lock free call. It must NOT be called holding the PartitionContext lock.
+func (pc *PartitionContext) restoreAppQueue(app *objects.Application) bool {
+	queue := pc.resolveRevivedQueue(app)
+	if queue == nil {
+		return false
+	}
+	app.RestoreQueue(queue)
+	queue.AddApplication(app)
+	// A moveTerminatedApp running concurrently can file this app as completed while we revive it; put
+	// it back on the active list and drop that completed generation so the maps stay consistent.
+	pc.ensureAppActive(app)
+	return true
+}
+
+// ensureAppActive makes the partition tracking consistent for a freshly revived application: it puts
+// the application back on the active list and drops any completed generation that still points at the
+// same application, covering a moveTerminatedApp that filed it as completed while the revival was in
+// flight.
+func (pc *PartitionContext) ensureAppActive(app *objects.Application) {
+	pc.Lock()
+	defer pc.Unlock()
+	appID := app.ApplicationID
+	pc.applications[appID] = app
+	for key, completed := range pc.completedApplications {
+		if completed == app {
+			delete(pc.completedApplications, key)
+		}
+	}
+}
+
+// resolveRevivedQueue resolves (recreating when needed) the leaf queue for a reviving application and
+// records the app-to-queue mapping. Returns nil when no leaf queue can be resolved.
+// NOTE: this call takes the PartitionContext lock. It must NOT be called holding the lock.
+func (pc *PartitionContext) resolveRevivedQueue(app *objects.Application) *objects.Queue {
+	pc.Lock()
+	defer pc.Unlock()
+	queueName := app.GetQueuePath()
+	queue := pc.getQueueInternal(queueName)
+	if queue == nil {
+		var err error
+		if common.IsRecoveryQueue(queueName) {
+			queue, err = pc.createRecoveryQueue()
+		} else {
+			queue, err = pc.createQueue(queueName, app.GetUser())
+		}
+		if err != nil {
+			log.Log(log.SchedPartition).Warn("failed to recreate queue while reviving application",
+				zap.String("partitionName", pc.Name),
+				zap.String("appID", app.ApplicationID),
+				zap.String("queue", queueName),
+				zap.Error(err))
+			return nil
+		}
+	}
+	if !queue.IsLeafQueue() {
+		log.Log(log.SchedPartition).Warn("queue is no longer a leaf while reviving application",
+			zap.String("partitionName", pc.Name),
+			zap.String("appID", app.ApplicationID),
+			zap.String("queue", queueName))
+		return nil
+	}
+	pc.appQueueMapping.AddAppQueueMapping(app.ApplicationID, queue)
+	return queue
+}
+
 // GetQueue returns queue from the structure based on the fully qualified name.
 // Wrapper around the unlocked version getQueueInternal()
 // Visible by tests
@@ -499,7 +654,8 @@ func (pc *PartitionContext) GetQueue(name string) *objects.Queue {
 // The name is not syntax checked and must be valid.
 // Returns nil if the queue is not found otherwise the queue object.
 //
-// NOTE: this is a lock free call. It should only be called holding the PartitionContext lock.
+// getQueueInternal walks the queue hierarchy from the root. It needs no partition lock: root is set when the
+// partition is built and never replaced, and the walk uses the queue locks.
 func (pc *PartitionContext) getQueueInternal(name string) *objects.Queue {
 	// start at the root
 	queue := pc.root
@@ -593,7 +749,7 @@ func (pc *PartitionContext) AddNode(node *objects.Node) error {
 		zap.String("partition", pc.Name),
 		zap.String("nodeID", node.NodeID))
 	if pc.isDraining() || pc.isStopped() {
-		return fmt.Errorf("partition %s is stopped cannot add a new node %s", pc.Name, node.NodeID)
+		return fmt.Errorf("partition %s is draining or stopped, cannot add a new node %s", pc.Name, node.NodeID)
 	}
 	if err := pc.addNodeToList(node); err != nil {
 		return err
@@ -697,6 +853,8 @@ func (pc *PartitionContext) removeNode(nodeID string) ([]*objects.Allocation, []
 // of the node object as updating the applications and queues is the only goal. Applications and queues are not accessible
 // from the node. The removed and confirmed allocations are returned.
 // NOTE: this is a lock free call. It must NOT be called holding the PartitionContext lock.
+// The body only reads the lock, so the derivation would exclude a writer alone: keep the wider rule.
+// +checklocksexclude:pc.RWMutex
 func (pc *PartitionContext) removeNodeAllocations(node *objects.Node) ([]*objects.Allocation, []*objects.Allocation) {
 	released := make([]*objects.Allocation, 0)
 	confirmed := make([]*objects.Allocation, 0)
@@ -884,6 +1042,8 @@ func (pc *PartitionContext) tryPlaceholderAllocate() *objects.AllocationResult {
 
 // Process the allocation and make the left over changes in the partition.
 // NOTE: this is a lock free call. It must NOT be called holding the PartitionContext lock.
+// The body only reads the lock, so the derivation would exclude a writer alone: keep the wider rule.
+// +checklocksexclude:pc.RWMutex
 func (pc *PartitionContext) allocate(result *objects.AllocationResult) *objects.AllocationResult {
 	// find the app make sure it still exists
 	appID := result.Request.GetApplicationID()
@@ -1111,9 +1271,10 @@ func (pc *PartitionContext) GetRejectedApplications() []*objects.Application {
 	return appList
 }
 
-func (pc *PartitionContext) getAppsState(appMap map[string]*objects.Application, state string) []string {
-	pc.RLock()
-	defer pc.RUnlock()
+// The map walked here is one of the partition tracking maps, so the partition lock has to be held
+// for the walk even though the map is reached through a parameter.
+// +checklocksread:pc.RWMutex
+func (pc *PartitionContext) getAppsStateInternal(appMap map[string]*objects.Application, state string) []string {
 	var apps []string
 	for appID, app := range appMap {
 		if app.CurrentState() == state {
@@ -1126,17 +1287,23 @@ func (pc *PartitionContext) getAppsState(appMap map[string]*objects.Application,
 // getAppsByState returns a slice of applicationIDs for the current applications filtered by state
 // Completed and Rejected applications are tracked in a separate map and will never be included.
 func (pc *PartitionContext) getAppsByState(state string) []string {
-	return pc.getAppsState(pc.applications, state)
+	pc.RLock()
+	defer pc.RUnlock()
+	return pc.getAppsStateInternal(pc.applications, state)
 }
 
 // getRejectedAppsByState returns a slice of applicationIDs for the rejected applications filtered by state.
 func (pc *PartitionContext) getRejectedAppsByState(state string) []string {
-	return pc.getAppsState(pc.rejectedApplications, state)
+	pc.RLock()
+	defer pc.RUnlock()
+	return pc.getAppsStateInternal(pc.rejectedApplications, state)
 }
 
 // getCompletedAppsByState returns a slice of applicationIDs for the completed applicationIDs filtered by state.
 func (pc *PartitionContext) getCompletedAppsByState(state string) []string {
-	return pc.getAppsState(pc.completedApplications, state)
+	pc.RLock()
+	defer pc.RUnlock()
+	return pc.getAppsStateInternal(pc.completedApplications, state)
 }
 
 // cleanupExpiredApps cleans up applications in the Expired state from the three tracking maps
@@ -1192,13 +1359,12 @@ func (pc *PartitionContext) UpdateAllocation(alloc *objects.Allocation) (bool, b
 		return pc.handleForeignAllocation(allocationKey, applicationID, nodeID, node, alloc)
 	}
 
-	// find application
-	app := pc.getApplication(alloc.GetApplicationID())
+	// find application, reviving it if the shim sent work after the core completed it
+	app := pc.getOrReviveApplication(applicationID)
 	if app == nil {
 		metrics.GetSchedulerMetrics().IncSchedulingError()
 		return false, false, fmt.Errorf("failed to find application %s", applicationID)
 	}
-	queue := app.GetQueue()
 
 	// find node if one is specified
 	allocated := alloc.IsAllocated()
@@ -1253,15 +1419,23 @@ func (pc *PartitionContext) UpdateAllocation(alloc *objects.Allocation) (bool, b
 			zap.String("appID", applicationID),
 			zap.String("allocationKey", allocationKey))
 
+		// pins the application in a runnable state before anything is charged to it
+		if err := app.RecoverAllocationAsk(alloc); err != nil {
+			metrics.GetSchedulerMetrics().IncSchedulingError()
+			return false, false, err
+		}
+		if err := app.AddAllocation(alloc); err != nil {
+			metrics.GetSchedulerMetrics().IncSchedulingError()
+			return false, false, err
+		}
+
 		// Increase the queue resource usage at any cost even if allocation put up the usage over the max resources.
 		// Quota preemption delay (only if set) used before restart cannot be adjusted based on the lost time after restart.
 		// So, override the quota preemption time with the configured delay again so that preemption would be triggerred once the delay expires.
-		queue.IncAllocatedResource(res, pc.IsQuotaPreemptionEnabled())
-		metrics.GetQueueMetrics(queue.GetQueuePath()).IncAllocatedContainer()
+		app.GetQueue().IncAllocatedResource(res, pc.IsQuotaPreemptionEnabled())
+		metrics.GetQueueMetrics(app.GetQueuePath()).IncAllocatedContainer()
 		node.AddAllocation(alloc)
 		alloc.SetInstanceType(node.GetInstanceType())
-		app.RecoverAllocationAsk(alloc)
-		app.AddAllocation(alloc)
 		pc.updateAllocationCount(1)
 		if alloc.IsPlaceholder() {
 			pc.incPhAllocationCount()
@@ -1324,16 +1498,19 @@ func (pc *PartitionContext) UpdateAllocation(alloc *objects.Allocation) (bool, b
 				zap.Error(err))
 			return false, false, err
 		}
+		if err := app.AddAllocation(existing); err != nil {
+			metrics.GetSchedulerMetrics().IncSchedulingError()
+			return false, false, err
+		}
 
 		// Increase the queue resource usage at any cost even if ask accommodated earlier based on the old max resources causes usage overflow based on the current max resources now.
 		// In case quota preemption set but not completed, usage would be brought down as part of enforcement through preemption when the already set delay expires.
 		// In case quota preemption set and completed already, configured delay would be set again and
 		// usage would be brought down when the newly set delay expires.
-		queue.IncAllocatedResource(alloc.GetAllocatedResource(), pc.IsQuotaPreemptionEnabled())
-		metrics.GetQueueMetrics(queue.GetQueuePath()).IncAllocatedContainer()
+		app.GetQueue().IncAllocatedResource(alloc.GetAllocatedResource(), pc.IsQuotaPreemptionEnabled())
+		metrics.GetQueueMetrics(app.GetQueuePath()).IncAllocatedContainer()
 		node.AddAllocation(existing)
 		existing.SetInstanceType(node.GetInstanceType())
-		app.AddAllocation(existing)
 		pc.updateAllocationCount(1)
 		if existing.IsPlaceholder() {
 			pc.incPhAllocationCount()
@@ -1393,7 +1570,8 @@ func (pc *PartitionContext) handleForeignAllocation(allocationKey, applicationID
 func (pc *PartitionContext) convertUGI(ugi *si.UserGroupInformation, forced bool) (security.UserGroup, error) {
 	pc.RLock()
 	defer pc.RUnlock()
-	return pc.userGroupCache.ConvertUGI(ugi, forced)
+	// YUNIKORN-3418: user/group resolution (OS/LDAP) runs under the partition read lock
+	return pc.userGroupCache.ConvertUGI(ugi, forced) // +lockblockingignore
 }
 
 // getOrStoreForeignAlloc returns whether the allocation already exists or stores it if it's new
@@ -1424,6 +1602,8 @@ func (pc *PartitionContext) getOrStoreForeignAlloc(alloc *objects.Allocation) bo
 // if slice[9] = 3, this means there are 3 nodes resource usage is in the range 80% to 90%.
 //
 // NOTE: this is a lock free call. It must NOT be called holding the PartitionContext lock.
+// The body takes no lock of its own, so there is nothing for the derivation to work from.
+// +checklocksexclude:pc.RWMutex
 func (pc *PartitionContext) calculateNodesResourceUsage() map[string][]int {
 	nodesCopy := pc.GetNodes()
 	mapResult := make(map[string][]int)
@@ -1594,6 +1774,15 @@ func (pc *PartitionContext) removeAllocation(release *si.AllocationRelease) ([]*
 // real allocation.
 func (pc *PartitionContext) replacePlaceholderOnNode(alloc *objects.Allocation, node *objects.Node, total *resources.Resource) *objects.Allocation {
 	confirmed := alloc.GetRelease()
+	if confirmed == nil {
+		log.Log(log.SchedPartition).Warn("unexpected placeholder replacement without replacement allocation, removing placeholder from node",
+			zap.String("nodeID", alloc.GetNodeID()),
+			zap.String("allocationKey", alloc.GetAllocationKey()))
+		if node.RemoveAllocation(alloc.GetAllocationKey()) != nil {
+			total.AddTo(alloc.GetAllocatedResource())
+		}
+		return nil
+	}
 	// we need to check the resources equality
 	delta := resources.Sub(confirmed.GetAllocatedResource(), alloc.GetAllocatedResource())
 	// Any negative value in the delta means that at least one of the requested resource in the
@@ -1744,7 +1933,19 @@ func (pc *PartitionContext) moveTerminatedApp(appID string) {
 			zap.String("appID", appID))
 		return
 	}
-	app.UnSetQueue()
+	// enter_Completed dispatches this on its own goroutine, so the app can have been revived in the
+	// meantime: moving it now would strip the queue off a running application. Detach the queue and
+	// decide to complete in a single step under the application lock so it cannot race the revival.
+	queue, ok := app.DetachQueueForCompletion()
+	if !ok {
+		log.Log(log.SchedPartition).Info("Application was revived before cleanup, not removing it",
+			zap.String("appID", appID),
+			zap.String("app status", app.CurrentState()))
+		return
+	}
+	if queue != nil {
+		queue.RemoveApplication(app)
+	}
 	// new ID as completedApplications map key, use negative value to get a divider
 	newID := appID + strconv.FormatInt(-(time.Now()).Unix(), 10)
 	log.Log(log.SchedPartition).Info("Removing terminated application from the application list",
@@ -1753,6 +1954,15 @@ func (pc *PartitionContext) moveTerminatedApp(appID string) {
 	app.LogAppSummary(pc.RmID)
 	pc.Lock()
 	defer pc.Unlock()
+	// A revival can start the moment the queue is detached above (the shim sees an app with no queue)
+	// and re-attach a queue through restoreAppQueue/ensureAppActive. The revived flag is read lock
+	// free, so it is safe to check while holding the partition lock: leave a revived app active and
+	// let the revival own the active-list entry.
+	if app.IsRevived() {
+		log.Log(log.SchedPartition).Info("Application revived during cleanup, leaving it on the active list",
+			zap.String("appID", appID))
+		return
+	}
 	delete(pc.applications, appID)
 	pc.completedApplications[newID] = app
 }
@@ -1763,6 +1973,8 @@ func (pc *PartitionContext) AddRejectedApplication(rejectedApplication *objects.
 			zap.String("currentState", rejectedApplication.CurrentState()),
 			zap.Error(err))
 	}
+	pc.Lock()
+	defer pc.Unlock()
 	if pc.rejectedApplications == nil {
 		pc.rejectedApplications = make(map[string]*objects.Application)
 	}

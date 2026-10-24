@@ -33,8 +33,9 @@ const defaultChannelBufSize = 1000
 // EventStreaming implements the event streaming logic.
 // New events are immediately forwarded to all active consumers.
 type EventStreaming struct {
-	buffer       *eventRingBuffer
-	stopCh       chan struct{}
+	buffer *eventRingBuffer // set on creation and never changed, no lock needed
+	stopCh chan struct{}    // set on creation and never changed, no lock needed
+	// +checklocks:RWMutex
 	eventStreams map[*EventStream]eventConsumerDetails
 	locking.RWMutex
 }
@@ -106,7 +107,15 @@ func (e *EventStreaming) CreateEventStream(name string, count uint64) *EventStre
 		// map, so "local" will also contain the new event.
 		seen := make(map[*si.EventRecord]bool)
 		for _, event := range history {
-			consumer <- event
+			select {
+			case consumer <- event:
+			case <-e.stopCh:
+				close(consumer)
+				return
+			case <-stop:
+				close(consumer)
+				return
+			}
 			seen[event] = true
 		}
 		for {
@@ -124,7 +133,15 @@ func (e *EventStreaming) CreateEventStream(name string, count uint64) *EventStre
 				// since events are processed in a single goroutine, doubling is no longer
 				// possible at this point
 				seen = make(map[*si.EventRecord]bool)
-				consumer <- event
+				select {
+				case consumer <- event:
+				case <-e.stopCh:
+					close(consumer)
+					return
+				case <-stop:
+					close(consumer)
+					return
+				}
 			}
 		}
 	}(consumer, local, stop)
@@ -159,6 +176,7 @@ func (e *EventStreaming) RemoveEventStream(consumer *EventStream) {
 	e.removeEventStream(consumer)
 }
 
+// +checklocks:e.RWMutex
 func (e *EventStreaming) removeEventStream(consumer *EventStream) {
 	if details, ok := e.eventStreams[consumer]; ok {
 		log.Log(log.Events).Info("Removing event stream consumer", zap.String("name", details.name),

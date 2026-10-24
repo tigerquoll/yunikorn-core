@@ -34,6 +34,7 @@ import (
 )
 
 const testNode = "testnode"
+const instType = "test-instance-type"
 
 func TestNewNode(t *testing.T) {
 	// simple nil check
@@ -99,8 +100,32 @@ func TestCheckConditions(t *testing.T) {
 	// Check if we can allocate on scheduling node (no plugins)
 	res := resources.NewResourceFromMap(map[string]resources.Quantity{"first": 1})
 	ask := newAllocationAsk("test", "app001", res)
-	if node.preAllocateConditions(ask) != nil {
-		t.Error("node with scheduling set to true no plugins should allow allocation")
+	tests := []struct {
+		name            string
+		mockPlugin      *mock.PredicatePlugin
+		predicateResult bool
+	}{
+		{"no plugins", nil, true},
+		{"filter fails", mock.NewPredicatePlugin(false, true, nil), false},
+		{"filter passes", mock.NewPredicatePlugin(false, false, nil), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.mockPlugin != nil {
+				plugins.RegisterSchedulerPlugin(tt.mockPlugin)
+			}
+			err := node.preAllocateConditions(ask)
+			if tt.predicateResult {
+				assert.NilError(t, err, "node with scheduling set to true no plugins should allow allocation")
+			} else {
+				assert.ErrorContains(t, err, "fake predicate plugin failed")
+				assert.Equal(t, 1, len(ask.allocLog))
+				assert.Equal(t, "fake predicate plugin failed", ask.allocLog["fake predicate plugin failed"].Message)
+			}
+			if tt.mockPlugin != nil {
+				plugins.UnregisterSchedulerPlugins()
+			}
+		})
 	}
 }
 
@@ -891,6 +916,32 @@ func TestNodeEvents(t *testing.T) {
 	assert.Equal(t, si.EventRecord_NODE_RESERVATION, event.EventChangeDetail)
 }
 
+func TestNodeAddedEventInstanceType(t *testing.T) {
+	total := resources.NewResourceFromMap(map[string]resources.Quantity{"cpu": 100, "memory": 100})
+	tests := []struct {
+		name       string
+		attributes map[string]string
+		want       string
+	}{
+		{"instance type set", map[string]string{common.InstanceType: instType}, instType},
+		{"instance type not set", map[string]string{"ready": "true"}, UnknownInstanceType},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockEvents := evtMock.NewEventSystem()
+			node := NewNode(newProto(testNode, total, tt.attributes))
+			node.nodeEvents = schedEvt.NewNodeEvents(mockEvents)
+
+			node.SendNodeAddedEvent()
+			assert.Equal(t, 1, len(mockEvents.Events))
+			event := mockEvents.Events[0]
+			assert.Equal(t, si.EventRecord_NODE, event.Type)
+			assert.Equal(t, si.EventRecord_ADD, event.EventChangeType)
+			assert.Equal(t, "Node added to the scheduler, instanceType: "+tt.want, event.Message)
+		})
+	}
+}
+
 func TestNode_FitInNode(t *testing.T) {
 	total := resources.NewResourceFromMap(map[string]resources.Quantity{"first": 10, "second": 10})
 	request := resources.NewResourceFromMap(map[string]resources.Quantity{"first": 1, "second": 1})
@@ -920,9 +971,6 @@ func TestNode_FitInNode(t *testing.T) {
 }
 
 func TestPreconditions(t *testing.T) {
-	defer plugins.UnregisterSchedulerPlugins()
-
-	plugins.RegisterSchedulerPlugin(mock.NewPredicatePlugin(true, map[string]int{}))
 	total := resources.NewResourceFromMap(map[string]resources.Quantity{"cpu": 100, "memory": 100})
 	proto := newProto(testNode, total, map[string]string{
 		"ready": "true",
@@ -931,17 +979,29 @@ func TestPreconditions(t *testing.T) {
 	ask := newAllocationAsk("test", "app001", res)
 	node := NewNode(proto)
 
-	// failure
-	err := node.preConditions(ask, true)
-	assert.ErrorContains(t, err, "fake predicate plugin failed")
-	assert.Equal(t, 1, len(ask.allocLog))
-	assert.Equal(t, "fake predicate plugin failed", ask.allocLog["fake predicate plugin failed"].Message)
-
-	// pass
-	plugins.RegisterSchedulerPlugin(mock.NewPredicatePlugin(false, map[string]int{}))
-	err = node.preConditions(ask, true)
-	assert.NilError(t, err)
-	assert.Equal(t, 1, len(ask.allocLog))
+	tests := []struct {
+		name            string
+		mockPlugin      *mock.PredicatePlugin
+		predicateResult bool
+	}{
+		{"filter fails", mock.NewPredicatePlugin(false, true, nil), false},
+		{"filter passes", mock.NewPredicatePlugin(false, false, nil), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			plugins.RegisterSchedulerPlugin(tt.mockPlugin)
+			err := node.preConditions(ask, true)
+			if tt.predicateResult {
+				assert.NilError(t, err)
+				assert.Equal(t, 1, len(ask.allocLog))
+			} else {
+				assert.ErrorContains(t, err, "fake predicate plugin failed")
+				assert.Equal(t, 1, len(ask.allocLog))
+				assert.Equal(t, "fake predicate plugin failed", ask.allocLog["fake predicate plugin failed"].Message)
+			}
+			plugins.UnregisterSchedulerPlugins()
+		})
+	}
 }
 
 func TestGetAllocations(t *testing.T) {

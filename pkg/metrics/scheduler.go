@@ -60,14 +60,15 @@ type SchedulerMetrics struct {
 	applicationSubmission *prometheus.CounterVec
 	application           *prometheus.GaugeVec
 	node                  *prometheus.GaugeVec
-	nodeResourceUsage     map[string]*prometheus.GaugeVec
-	schedulingLatency     prometheus.Histogram
-	schedulingCycle       prometheus.Histogram
-	sortingLatency        *prometheus.HistogramVec
-	tryNodeLatency        prometheus.Histogram
-	tryPreemptionLatency  prometheus.Histogram
-	tryNodeEvaluation     prometheus.Histogram
-	lock                  locking.RWMutex
+	// +checklocks:lock
+	nodeResourceUsage    map[string]*prometheus.GaugeVec
+	schedulingLatency    prometheus.Histogram
+	schedulingCycle      prometheus.Histogram
+	sortingLatency       *prometheus.HistogramVec
+	tryNodeLatency       prometheus.Histogram
+	tryPreemptionLatency prometheus.Histogram
+	tryNodeEvaluation    prometheus.Histogram
+	lock                 locking.RWMutex
 }
 
 // InitSchedulerMetrics to initialize scheduler metrics
@@ -84,7 +85,7 @@ func InitSchedulerMetrics() *SchedulerMetrics {
 			Subsystem: SchedulerSubsystem,
 			Name:      "container_allocation_attempt_total",
 			Help:      "Total number of attempts to allocate containers. State of the attempt includes `allocated`, `rejected`, `error`, `released`",
-		}, []string{"state"})
+		}, []string{StateLabel})
 
 	s.applicationSubmission = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
@@ -92,7 +93,7 @@ func InitSchedulerMetrics() *SchedulerMetrics {
 			Subsystem: SchedulerSubsystem,
 			Name:      "application_submission_total",
 			Help:      "Total number of application submissions. State of the attempt includes `new`, `accepted` and `rejected`.",
-		}, []string{"result"})
+		}, []string{ResultLabel})
 
 	s.application = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
@@ -100,7 +101,7 @@ func InitSchedulerMetrics() *SchedulerMetrics {
 			Subsystem: SchedulerSubsystem,
 			Name:      "application_total",
 			Help:      "Total number of applications. State of the application includes `running`, `resuming`, `failing`, `completing`, `completed` and `failed`.",
-		}, []string{"state"})
+		}, []string{StateLabel})
 
 	s.node = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
@@ -108,7 +109,7 @@ func InitSchedulerMetrics() *SchedulerMetrics {
 			Subsystem: SchedulerSubsystem,
 			Name:      "node",
 			Help:      "Total number of nodes. State of the node includes `active` and `failed`.",
-		}, []string{"state"})
+		}, []string{StateLabel})
 
 	s.schedulingLatency = prometheus.NewHistogram(
 		prometheus.HistogramOpts{
@@ -137,7 +138,7 @@ func InitSchedulerMetrics() *SchedulerMetrics {
 			Name:      "node_sorting_latency_milliseconds",
 			Help:      "Latency of all nodes sorting, in seconds.",
 			Buckets:   prometheus.ExponentialBuckets(0.0001, 10, 8), // start from 0.1ms
-		}, []string{"level"})
+		}, []string{LevelLabel})
 
 	s.tryNodeLatency = prometheus.NewHistogram(
 		prometheus.HistogramOpts{
@@ -371,9 +372,34 @@ func (m *SchedulerMetrics) IncTotalApplicationsCompleted() {
 	m.application.WithLabelValues(AppCompleted).Inc()
 }
 
+// DecTotalApplicationsCompleted reverses IncTotalApplicationsCompleted when a completed
+// application is revived.
+func (m *SchedulerMetrics) DecTotalApplicationsCompleted() {
+	m.application.WithLabelValues(AppCompleted).Dec()
+}
+
 func (m *SchedulerMetrics) GetTotalApplicationsCompleted() (int, error) {
 	metricDto := &dto.Metric{}
 	err := m.application.WithLabelValues(AppCompleted).Write(metricDto)
+	if err == nil {
+		return int(*metricDto.Gauge.Value), nil
+	}
+	return -1, err
+}
+
+// IncTotalApplicationsRevived counts an application brought back out of the Completed state.
+func (m *SchedulerMetrics) IncTotalApplicationsRevived() {
+	m.application.WithLabelValues(AppRevived).Inc()
+}
+
+// DecTotalApplicationsRevived is called when a revived application completes again.
+func (m *SchedulerMetrics) DecTotalApplicationsRevived() {
+	m.application.WithLabelValues(AppRevived).Dec()
+}
+
+func (m *SchedulerMetrics) GetTotalApplicationsRevived() (int, error) {
+	metricDto := &dto.Metric{}
+	err := m.application.WithLabelValues(AppRevived).Write(metricDto)
 	if err == nil {
 		return int(*metricDto.Gauge.Value), nil
 	}

@@ -37,8 +37,8 @@ var (
 	preemptAttemptFrequency        = 15 * time.Second
 	preemptCheckConcurrency        = 10
 	scoreFitMax             uint64 = 1 << 32
-	scoreOriginator         uint64 = 1 << 33
-	scoreNoPreempt          uint64 = 1 << 34
+	scoreNoPreempt          uint64 = 1 << 33
+	scoreOriginator         uint64 = 1 << 34
 	scoreUnfit              uint64 = 1 << 35
 )
 
@@ -74,6 +74,7 @@ type QueuePreemptionSnapshot struct {
 }
 
 // NewPreemptor creates a new preemptor. The preemptor itself is not thread safe, and assumes the application lock is held.
+// +checklocksread:application.RWMutex
 func NewPreemptor(application *Application, headRoom *resources.Resource, preemptionDelay time.Duration, ask *Allocation, iterator NodeIterator, nodesTried bool) *Preemptor {
 	return &Preemptor{
 		application:     application,
@@ -134,6 +135,7 @@ func (p *Preemptor) initQueueSnapshots() {
 
 // initWorkingState builds helper data structures required to compute a solution
 // returns the number of reservations released while preparing the data structures
+// +checklocks:p.application.RWMutex
 func (p *Preemptor) initWorkingState() int {
 	// return if we have already run
 	if p.nodeAvailableMap != nil {
@@ -166,7 +168,9 @@ func (p *Preemptor) initWorkingState() int {
 		isReserved := false
 		if node.IsReserved() && !node.isReservedForAllocation(p.ask.GetAllocationKey()) {
 			askPriority := p.ask.priority
-			released, remaining := p.application.cancelMatchingReservations(node.GetReservations(), func(res *reservation) bool {
+			// application lock is held by the caller of TryPreemption, the analysis does not
+			// follow facts into the iterator closure
+			released, remaining := p.application.cancelMatchingReservations(node.GetReservations(), func(res *reservation) bool { // +checklocksignore
 				if res.alloc.requiredNode != "" || res.alloc.HasTriggeredPreemption() {
 					return false
 				}
@@ -248,18 +252,12 @@ func (p *Preemptor) calculateVictimsByNode(nodeAvailable *resources.Resource, po
 	}
 
 	allocationsByQueueSnap := p.duplicateQueueSnapshots()
-	// get the current queue snapshot
-	askQueue, ok := allocationsByQueueSnap[p.queuePath]
-	if !ok {
-		log.Log(log.SchedPreemption).Warn("BUG: Queue not found by name", zap.String("queuePath", p.queuePath))
-		return -1, nil
-	}
 
 	// First pass: Check each task to see whether we are able to reduce our shortfall by preempting each
 	// task in turn, and filter out tasks which will cause their queue to drop below guaranteed capacity.
 	// If a task could be preempted without violating queue constraints, add it to either the 'head' list or the
 	// 'tail' list depending on whether the shortfall is reduced. If added to the 'head' list, adjust the node available
-	// capacity and the queue guaranteed headroom.
+	// capacity.
 	head := make([]*Allocation, 0)
 	tail := make([]*Allocation, 0)
 	for _, victim := range potentialVictims {
@@ -274,27 +272,14 @@ func (p *Preemptor) calculateVictimsByNode(nodeAvailable *resources.Resource, po
 				// At times, over-allocation happens because of resource types in usage but not defined as guaranteed.
 				// So, as an additional check, res types used by ask should be either -ve or zero in victim queue remaining guaranteed resource to confirm
 				// some relevant useful victim is there.
-				// In case of victims densely populated on any specific node, checking/honouring the guaranteed quota on ask or preemptor queue
-				// acts as early filtering layer to carry forward only the required victims.
-				// For other cases like victims spread over multiple nodes, this doesn't add great value.
 				if resources.StrictlyGreaterThanOrEquals(preemptableResource, resources.Zero) &&
 					(remaining == nil || isVictimQueueOverGuaranteed(p.ask.GetAllocatedResource(), remaining)) {
-					// Does victimQueue have space equivalent to the resource used by the victim?
-					askQueueRemaining := askQueue.GetRemainingGuaranteedResource()
-					if askQueueRemaining != nil && askQueueRemaining.FitInActual(victim.GetAllocatedResource()) {
-						askQueue.AddAllocation(victim.GetAllocatedResource())
-					} else {
-						queueSnapshot.AddAllocation(victim.GetAllocatedResource())
-						break
-					}
-
 					// check to see if the shortfall on the node has changed
 					shortfall := resources.SubEliminateNegative(p.ask.GetAllocatedResource(), nodeCurrentAvailable)
 					newAvailable := resources.Add(nodeCurrentAvailable, victim.GetAllocatedResource())
 					newShortfall := resources.SubEliminateNegative(p.ask.GetAllocatedResource(), newAvailable)
 					if resources.EqualsOrEmpty(shortfall, newShortfall) {
 						// shortfall did not change, so task should only be considered as a last resort
-						askQueue.RemoveAllocation(victim.GetAllocatedResource())
 						queueSnapshot.AddAllocation(victim.GetAllocatedResource())
 						tail = append(tail, victim)
 					} else {
@@ -380,10 +365,10 @@ func (p *Preemptor) duplicateQueueSnapshots() map[string]*QueuePreemptionSnapsho
 }
 
 // checkPreemptionPredicates calls the shim via the SI to evaluate nodes for preemption
-func (p *Preemptor) checkPreemptionPredicates(predicateChecks []*si.PreemptionPredicatesArgs, victimsByNode map[string][]*Allocation) *predicateCheckResult {
+func (p *Preemptor) checkPreemptionPredicates(predicateChecks []*si.PreemptionPredicatesArgs, victimsByNode map[string][]*Allocation) (*predicateCheckResult, map[string]int) {
 	// don't process empty list
 	if len(predicateChecks) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	// sort predicate checks by number of expected preempted tasks
@@ -411,12 +396,13 @@ func (p *Preemptor) checkPreemptionPredicates(predicateChecks []*si.PreemptionPr
 			index:         int(check.StartIndex),
 		}
 		result.populateVictims(victimsByNode)
-		return result
+		return result, nil
 	}
 
 	// process each batch of checks by sending to the RM
 	batches := batchPreemptionChecks(predicateChecks, preemptCheckConcurrency)
 	var bestResult *predicateCheckResult = nil
+	predicateErrors := make(map[string]int)
 	for _, batch := range batches {
 		var wg sync.WaitGroup
 		ch := make(chan *predicateCheckResult, len(batch))
@@ -425,7 +411,10 @@ func (p *Preemptor) checkPreemptionPredicates(predicateChecks []*si.PreemptionPr
 			// add goroutine for checking preemption
 			wg.Add(1)
 			expected++
-			go preemptPredicateCheck(plugin, ch, &wg, args)
+			go func() {
+				defer wg.Done()
+				ch <- runPredicateChecks(plugin, args)
+			}()
 		}
 		// wait for completion and close channel
 		go func() {
@@ -440,6 +429,10 @@ func (p *Preemptor) checkPreemptionPredicates(predicateChecks []*si.PreemptionPr
 				} else if result.betterThan(bestResult, p.allocationsByNode) {
 					bestResult = result
 				}
+			} else {
+				for e := range result.predicateErrors {
+					predicateErrors[e]++
+				}
 			}
 		}
 		// if the best resultType we have from this batch meets all our criteria, don't run another batch
@@ -448,7 +441,7 @@ func (p *Preemptor) checkPreemptionPredicates(predicateChecks []*si.PreemptionPr
 		}
 	}
 	bestResult.populateVictims(victimsByNode)
-	return bestResult
+	return bestResult, predicateErrors
 }
 
 // calculateAdditionalVictims finds additional preemption victims necessary to ensure
@@ -485,9 +478,7 @@ func (p *Preemptor) calculateAdditionalVictims(nodeVictims []*Allocation) ([]*Al
 			potentialVictims = append(potentialVictims, victim)
 		}
 	}
-	sort.SliceStable(potentialVictims, func(i, j int) bool {
-		return compareAllocationLess(potentialVictims[i], potentialVictims[j])
-	})
+	SortAllocationsBasedOnAsk(potentialVictims, askQueue.GetMaxResource(), p.ask.GetAllocatedResource())
 
 	// evaluate each potential victim in turn, stopping once sufficient resources have been freed
 	victims := make([]*Allocation, 0)
@@ -505,25 +496,7 @@ func (p *Preemptor) calculateAdditionalVictims(nodeVictims []*Allocation) ([]*Al
 				preemptableResource := queueSnapshot.GetPreemptableResource()
 				if resources.StrictlyGreaterThanOrEquals(preemptableResource, resources.Zero) &&
 					(remaining == nil || isVictimQueueOverGuaranteed(p.ask.GetAllocatedResource(), remaining)) {
-					// Does victimQueue have space equivalent to the resource used by the victim?
-					askQueueRemaining := askQueue.GetRemainingGuaranteedResource()
-					if askQueueRemaining != nil && askQueueRemaining.FitInActual(victim.GetAllocatedResource()) {
-						askQueue.AddAllocation(victim.GetAllocatedResource())
-					} else {
-						queueSnapshot.AddAllocation(victim.GetAllocatedResource())
-						break
-					}
-					askQueueNewRemaining := askQueue.GetRemainingGuaranteedResource()
-
-					// check to see if the shortfall on the queue has changed
-					if !resources.EqualsOrEmpty(askQueueRemaining, askQueueNewRemaining) {
-						// remaining capacity changed, so we should keep this task
-						victims = append(victims, victim)
-					} else {
-						// remaining guaranteed amount in ask queue did not change, so preempting task won't help
-						askQueue.RemoveAllocation(victim.GetAllocatedResource())
-						queueSnapshot.AddAllocation(victim.GetAllocatedResource())
-					}
+					victims = append(victims, victim)
 				} else {
 					// removing this allocation would have reduced queue below guaranteed limits, put it back
 					queueSnapshot.AddAllocation(victim.GetAllocatedResource())
@@ -550,7 +523,23 @@ func (p *Preemptor) tryNodes() (string, []*Allocation, bool) {
 	// calculate victim list for each node
 	predicateChecks := make([]*si.PreemptionPredicatesArgs, 0)
 	victimsByNode := make(map[string][]*Allocation)
+
+	// run predicates for this pod before in hand and fetch feasible nodes
+	feasibleNodes, predicatesResult := p.ask.preAllocateConditions(true)
+	if !predicatesResult {
+		return "", nil, false
+	}
+
 	for nodeID, nodeAvailable := range p.nodeAvailableMap {
+		// Is this node suitable to run the pod?
+		if len(feasibleNodes) > 0 {
+			if _, ok := feasibleNodes[nodeID]; !ok {
+				log.Log(log.SchedApplication).Debug("skipping node as it is not feasible to run the pod",
+					zap.String("allocationKey", p.ask.GetAllocationKey()),
+					zap.String("node", nodeID))
+				continue
+			}
+		}
 		allocations, ok := p.allocationsByNode[nodeID]
 		if !ok {
 			// no allocations present, but node may still be available for scheduling
@@ -575,13 +564,17 @@ func (p *Preemptor) tryNodes() (string, []*Allocation, bool) {
 		}
 	}
 	// call predicates to evaluate each node
-	result := p.checkPreemptionPredicates(predicateChecks, victimsByNode)
+	result, predicateErrors := p.checkPreemptionPredicates(predicateChecks, victimsByNode)
 	if result != nil && result.success {
 		return result.nodeID, result.victims, true
+	}
+	if len(predicateErrors) > 0 {
+		p.ask.SendPredicatesFailedEvent(predicateErrors)
 	}
 	return "", nil, false
 }
 
+// +checklocks:p.application.RWMutex
 func (p *Preemptor) TryPreemption() (*AllocationResult, bool) {
 	// validate that sufficient capacity can be freed
 	if !p.checkPreemptionQueueGuarantees() {
@@ -597,56 +590,71 @@ func (p *Preemptor) TryPreemption() (*AllocationResult, bool) {
 	p.application.executeReservationReleasedCallback(released)
 
 	// try to find a node to schedule on and victims to preempt
-	nodeID, victims, ok := p.tryNodes()
+	// predicate evaluation fans out per node and waits for the plugin under the application lock: the
+	// in-process scheduling path, same as tryNode
+	nodeID, nodeVictims, ok := p.tryNodes() // +lockblockingignore
 	if !ok {
 		// no preemption possible
 		return nil, false
 	}
 
 	// look for additional victims in case we have not yet made enough capacity in the queue
-	extraVictims, ok := p.calculateAdditionalVictims(victims)
+	extraVictims, ok := p.calculateAdditionalVictims(nodeVictims)
 	if !ok {
 		// not enough resources were preempted
 		return nil, false
 	}
-	victims = append(victims, extraVictims...)
-	if len(victims) == 0 {
+	if len(nodeVictims)+len(extraVictims) == 0 {
 		return nil, false
 	}
 
 	// Did victims collected so far fulfill the ask need? In case of any shortfall between the ask resource requirement
 	// and total victims resources, preemption won't help even though victims has been collected.
 
-	// Holds total victims resources
-	victimsTotalResource := resources.NewResource()
+	// Holds total victims resources and node-specific victims resources
+	totalVictimsResource := resources.NewResource()
+	nodeVictimsResource := resources.NewResource()
 
-	fitIn := false
-	nodeCurrentAvailable := p.nodeAvailableMap
-	if nodeCurrentAvailable[nodeID].FitIn(p.ask.GetAllocatedResource()) {
-		fitIn = true
+	fitIn := p.nodeAvailableMap[nodeID].FitIn(p.ask.GetAllocatedResource())
+
+	// Victims selected for the chosen node by tryNodes() are required for node capacity
+	// and predicate constraints (e.g. PodAntiAffinity) evaluated by the ResourceManager plugin.
+	// They must not be truncated based on raw ask resource demand.
+	var finalVictims []*Allocation
+	for _, victim := range nodeVictims {
+		finalVictims = append(finalVictims, victim)
+		allocRes := victim.GetAllocatedResource()
+		totalVictimsResource.AddTo(allocRes)
+		nodeVictimsResource.AddTo(allocRes)
 	}
 
-	// Since there could be more victims than the actual need, ensure only required victims are filtered finally
+	// Since there could be more extra victims than the actual need, ensure only required victims are filtered finally
 	// to do: There is room for improvements especially when there are more victims. victims could be chosen based
 	// on different criteria. for example, victims could be picked up either from specific node (bin packing) or
 	// from multiple nodes (fair) given the choices.
-	var finalVictims []*Allocation
-	for _, victim := range victims {
+	for _, victim := range extraVictims {
 		// Victims from any node is acceptable as long as chosen node has enough space to accommodate the ask
 		// Otherwise, preempting victims from 'n' different nodes doesn't help to achieve the goal.
-		if !fitIn && victim.GetNodeID() != nodeID {
-			continue
+		if victim.GetNodeID() != nodeID {
+			if !fitIn {
+				continue
+			}
 		}
-		// stop collecting the victims once ask resource requirement met
-		if p.ask.GetAllocatedResource().StrictlyGreaterThanOnlyExisting(victimsTotalResource) {
-			finalVictims = append(finalVictims, victim)
+		// check if victim contributes to any resource dimension that is still needed
+		allocRes := victim.GetAllocatedResource()
+		for k, needVal := range p.ask.GetAllocatedResource().Resources {
+			if totalVictimsResource.Resources[k] < needVal && allocRes.Resources[k] > 0 {
+				finalVictims = append(finalVictims, victim)
+				totalVictimsResource.AddTo(allocRes)
+				if victim.GetNodeID() == nodeID {
+					nodeVictimsResource.AddTo(allocRes)
+				}
+				break
+			}
 		}
-		// add the victim resources to the total
-		victimsTotalResource.AddTo(victim.GetAllocatedResource())
 	}
 
-	if p.ask.GetAllocatedResource().StrictlyGreaterThanOnlyExisting(victimsTotalResource) {
-		// there is shortfall, so preemption doesn't help
+	if p.hasPreemptionShortfall(nodeID, nodeVictimsResource, totalVictimsResource) {
 		p.ask.LogAllocationFailure(common.PreemptionShortfall, true)
 		return nil, false
 	}
@@ -709,9 +717,34 @@ func (p *Preemptor) TryPreemption() (*AllocationResult, bool) {
 	log.Log(log.SchedPreemption).Info("Reserving node for ask after preemption",
 		zap.String("allocationKey", p.ask.GetAllocationKey()),
 		zap.String("nodeID", nodeID),
-		zap.Int("collected victim count", len(victims)),
+		zap.Int("collected victim count", len(nodeVictims)+len(extraVictims)),
 		zap.Int("preempted victim count", len(finalVictims)))
 	return newReservedAllocationResult(nodeID, p.ask), true
+}
+
+func (p *Preemptor) hasPreemptionShortfall(nodeID string, nodeVictimsResource *resources.Resource, totalVictimsResource *resources.Resource) bool {
+	if totalVictimsResource.IsEmpty() {
+		return true
+	}
+	for k, needVal := range p.ask.GetAllocatedResource().Resources {
+		// Node physical capacity check:
+		// Target node available capacity plus victims on this node must satisfy ask demand
+		nodeAvail := p.nodeAvailableMap[nodeID].Resources[k]
+		if nodeAvail+nodeVictimsResource.Resources[k] < needVal {
+			return true
+		}
+
+		// Queue quota headroom check:
+		// Queue headroom plus total victims preempted across the cluster must satisfy ask demand
+		if p.headRoom != nil {
+			if queueAvail, ok := p.headRoom.Resources[k]; ok {
+				if queueAvail+totalVictimsResource.Resources[k] < needVal {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // Duplicate creates a copy of this snapshot into the given map by queue path
@@ -853,55 +886,28 @@ func (qps *QueuePreemptionSnapshot) RemoveAllocation(alloc *resources.Resource) 
 	qps.AllocatedResource.SubFrom(alloc)
 }
 
-// compareAllocationLess compares two allocations for preemption. Allocations which have opted into preemption are
-// considered first, then allocations which are not the originator of their associated application. Ties are broken
-// by creation time, with
-// then
-func compareAllocationLess(left *Allocation, right *Allocation) bool {
-	scoreLeft := scoreAllocation(left)
-	scoreRight := scoreAllocation(right)
-	if scoreLeft != scoreRight {
-		return scoreLeft < scoreRight
-	}
-	return left.createTime.After(right.createTime)
-}
-
-// scoreAllocation generates a relative score for an allocation. Lower-scored allocations are considered more likely
-// preemption candidates. Tasks which have opted into preemption are considered first, then tasks which are not
-// application originators.
-func scoreAllocation(allocation *Allocation) uint64 {
-	var score uint64 = 0
-	if allocation.IsOriginator() {
-		score |= scoreOriginator
-	}
-	if !allocation.IsAllowPreemptSelf() {
-		score |= scoreNoPreempt
-	}
-	return score
-}
-
-// sortVictimsForPreemption sorts allocations on each node, preferring those that have opted-in to preemption,
-// those that are not originating tasks for an application, and newest first
+// sortVictimsForPreemption sorts allocations on each node, preferring those that are not originating tasks for an
+// application, those that have opted-in to preemption, and newest first
 func sortVictimsForPreemption(allocationsByNode map[string][]*Allocation) {
 	for _, allocations := range allocationsByNode {
 		sort.SliceStable(allocations, func(i, j int) bool {
 			leftAsk := allocations[i]
 			rightAsk := allocations[j]
 
-			// sort asks which allow themselves to be preempted first
-			if leftAsk.IsAllowPreemptSelf() && !rightAsk.IsAllowPreemptSelf() {
-				return true
-			}
-			if rightAsk.IsAllowPreemptSelf() && !leftAsk.IsAllowPreemptSelf() {
-				return false
-			}
-
-			// next those that are not app originators
+			// sort asks which are not app originators first
 			if leftAsk.IsOriginator() && !rightAsk.IsOriginator() {
 				return false
 			}
 			if rightAsk.IsOriginator() && !leftAsk.IsOriginator() {
 				return true
+			}
+
+			// next those that allow themselves to be preempted
+			if leftAsk.IsAllowPreemptSelf() && !rightAsk.IsAllowPreemptSelf() {
+				return true
+			}
+			if rightAsk.IsAllowPreemptSelf() && !leftAsk.IsAllowPreemptSelf() {
+				return false
 			}
 
 			// finally sort by creation time descending
