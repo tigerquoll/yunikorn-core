@@ -210,8 +210,7 @@ const (
 	manyAppsBatch        = 1000
 	manyAppsRequestMem   = 10
 	manyAppsRequestVcore = 1
-	// Nodes hold far more pods than any grid point needs (100k slots against 25k pods at the largest
-	// M) so that neither node capacity nor queue quota ever limits the measured rate.
+	// Node capacity is four times the pods of the largest grid point, so it never limits the rate.
 	manyAppsPodsPerNode = 100
 
 	shapeOneApp    = "oneApp"
@@ -231,8 +230,7 @@ func manyAppsAsk(allocationKey, appID string) *si.Allocation {
 	}
 }
 
-// addManyAppsApplications submits the applications in batches and returns once all of them are
-// accepted: an ask for an application the core has not accepted yet is rejected.
+// addManyAppsApplications waits for each application to be accepted: the core rejects asks for unknown applications.
 func addManyAppsApplications(b *testing.B, proxy api.SchedulerAPI, mockRM *mockRMCallback, prefix string, count int) {
 	for start := 0; start < count; start += manyAppsBatch {
 		end := min(start+manyAppsBatch, count)
@@ -251,9 +249,7 @@ func addManyAppsApplications(b *testing.B, proxy api.SchedulerAPI, mockRM *mockR
 	}
 }
 
-// verifyIdleApps checks the shape the benchmark claims to measure: the leaf queue holds every idle and
-// work application, and each idle application is Running with nothing pending. An idle application that
-// completed or was removed would drop out of the sort being measured.
+// verifyIdleApps fails unless every idle application is in root.a, Running and with nothing pending.
 func verifyIdleApps(b *testing.B, serviceContext *entrypoint.ServiceContext, numIdleApps, numWorkApps int) {
 	queue := serviceContext.Scheduler.GetClusterContext().GetPartition(partition).GetQueue("root.a")
 	if queue == nil {
@@ -287,8 +283,7 @@ func benchmarkSchedulingManyApps(b *testing.B, numIdleApps int, shape string) {
 	defer serviceContext.StopAll()
 	proxy := serviceContext.RMProxy
 
-	// Idle and timed applications share the one leaf queue: the cost under measurement is the per cycle
-	// walk over all applications of that queue. The queue is left without resource limits on purpose.
+	// Idle and work applications share one unlimited leaf queue: the per-cycle walk over its applications is the measured cost.
 	configData := `
 partitions:
   -
@@ -340,8 +335,7 @@ partitions:
 	assert.NilError(b, err, "NodeRequest nodes failed")
 	mockRM.waitForMinAcceptedNodes(b, manyAppsNodes, 60000)
 
-	// The idle applications keep their single allocation for the rest of the run, which is what holds
-	// them in Running with nothing pending.
+	// Idle allocations are never released, which keeps those applications Running with nothing pending.
 	addManyAppsApplications(b, proxy, mockRM, "idle", numIdleApps)
 	for start := 0; start < numIdleApps; start += manyAppsBatch {
 		end := min(start+manyAppsBatch, numIdleApps)

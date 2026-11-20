@@ -25,6 +25,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -763,6 +764,146 @@ func TestSortApplications(t *testing.T) {
 	_, err = app.AllocateAsk("alloc-1")
 	if err != nil || len(leaf.sortApplications(false)) != 0 {
 		t.Errorf("app with ask but no pending resources should not be in sorted apps: %v (err = %v)", app, err)
+	}
+}
+
+func TestQueuePendingApps(t *testing.T) {
+	root, err := createRootQueue(nil)
+	assert.NilError(t, err, "queue create failed")
+	leaf, err := createManagedQueue(root, "leaf", false, nil)
+	assert.NilError(t, err, "failed to create leaf queue")
+	res, err := resources.NewResourceFromConf(map[string]string{"first": "1"})
+	assert.NilError(t, err, "failed to create basic resource")
+
+	// an app can be attached after its asks were added
+	app1 := newApplication(appID1, "default", leaf.QueuePath)
+	app1.queue = leaf
+	err = app1.AddAllocationAsk(newAllocationAsk("alloc-1", appID1, res))
+	assert.NilError(t, err, "failed to add allocation ask")
+	leaf.AddApplication(app1)
+	assert.Assert(t, leaf.pendingApps[appID1] == app1, "attached app with pending resources is not a member")
+
+	app2 := newApplication(appID2, "default", leaf.QueuePath)
+	app2.queue = leaf
+	leaf.AddApplication(app2)
+	_, ok := leaf.pendingApps[appID2]
+	assert.Assert(t, !ok, "attached app without pending resources is a member")
+
+	before := reflect.ValueOf(leaf.pendingApps).Pointer()
+	_, err = app1.AllocateAsk("alloc-1")
+	assert.NilError(t, err, "failed to allocate ask")
+	assert.Equal(t, len(leaf.pendingApps), 0, "app without a pending ask left in the set")
+	assert.Assert(t, reflect.ValueOf(leaf.pendingApps).Pointer() != before, "emptied set kept its map")
+
+	err = app1.AddAllocationAsk(newAllocationAsk("alloc-2", appID1, res))
+	assert.NilError(t, err, "failed to add allocation ask")
+	assert.Assert(t, leaf.pendingApps[appID1] == app1, "app with a new pending ask is not a member")
+	leaf.RemoveApplication(app1)
+	_, ok = leaf.pendingApps[appID1]
+	assert.Assert(t, !ok, "removed app left in the set")
+
+	// the removed object still points at the queue: its flips must not resurrect the entry
+	err = app1.AddAllocationAsk(newAllocationAsk("alloc-3", appID1, res))
+	assert.NilError(t, err, "failed to add allocation ask")
+	_, ok = leaf.pendingApps[appID1]
+	assert.Assert(t, !ok, "flip of a removed app re-added it to the set")
+
+	leaf.AddApplication(app1)
+	assert.Assert(t, leaf.pendingApps[appID1] == app1, "re-attached app with pending resources is not a member")
+	app3 := newApplication(appID1, "default", leaf.QueuePath)
+	app3.queue = leaf
+	leaf.AddApplication(app3)
+	_, ok = leaf.pendingApps[appID1]
+	assert.Assert(t, !ok, "entry of the replaced app object left in the set")
+}
+
+// TestQueuePendingAppsConcurrent asserts the one way invariant the scheduler depends on: an
+// application with pending resources is never missing from the set. Extra members are harmless, the
+// sort filters them out.
+func TestQueuePendingAppsConcurrent(t *testing.T) {
+	root, err := createRootQueue(nil)
+	assert.NilError(t, err, "queue create failed")
+	leaf, err := createManagedQueue(root, "leaf", false, nil)
+	assert.NilError(t, err, "failed to create leaf queue")
+	res, err := resources.NewResourceFromConf(map[string]string{"first": "1"})
+	assert.NilError(t, err, "failed to create basic resource")
+
+	apps := make([]*Application, 3)
+	for i := range apps {
+		app := newApplication(fmt.Sprintf("app-%d", i), "default", leaf.QueuePath)
+		app.queue = leaf
+		leaf.AddApplication(app)
+		apps[i] = app
+	}
+
+	const rounds = 500
+	var wg sync.WaitGroup
+	churn := func(app *Application, tag string) {
+		defer wg.Done()
+		for i := range rounds {
+			key := fmt.Sprintf("%s-%d", tag, i)
+			if askErr := app.AddAllocationAsk(newAllocationAsk(key, app.ApplicationID, res)); askErr != nil {
+				continue
+			}
+			if _, allocErr := app.AllocateAsk(key); allocErr == nil {
+				_, _ = app.DeallocateAsk(key) //nolint:errcheck // the remove below cleans up either way
+			}
+			app.RemoveAllocationAsk(key)
+		}
+	}
+	// two goroutines on apps[0] so one application's flips interleave
+	wg.Add(4)
+	go churn(apps[0], "a")
+	go churn(apps[0], "b")
+	go churn(apps[1], "c")
+	go churn(apps[2], "d")
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for range rounds {
+			leaf.RemoveApplication(apps[2])
+			leaf.AddApplication(apps[2])
+		}
+	}()
+
+	done := make(chan struct{})
+	var sorter sync.WaitGroup
+	sorter.Add(1)
+	go func() {
+		defer sorter.Done()
+		for {
+			select {
+			case <-done:
+				return
+			default:
+				leaf.sortApplications(false)
+			}
+		}
+	}()
+
+	wg.Wait()
+	close(done)
+	sorter.Wait()
+
+	leaf.RLock()
+	members := make(map[string]*Application, len(leaf.pendingApps))
+	for id, app := range leaf.pendingApps {
+		members[id] = app
+	}
+	tracked := make(map[string]*Application, len(leaf.applications))
+	for id, app := range leaf.applications {
+		tracked[id] = app
+	}
+	leaf.RUnlock()
+
+	for id, app := range members {
+		assert.Assert(t, tracked[id] == app, "member %s is not the application the queue tracks", id)
+	}
+	for id, app := range tracked {
+		if resources.StrictlyGreaterThanZero(app.GetPendingResource()) {
+			assert.Assert(t, members[id] == app, "application %s with pending resources is missing from the set", id)
+		}
 	}
 }
 

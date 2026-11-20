@@ -59,6 +59,7 @@ type Queue struct {
 	children             map[string]*Queue         // Only for direct children, parent queue only
 	childPriorities      map[string]int32          // cached priorities for child queues
 	applications         map[string]*Application   // only for leaf queue
+	pendingApps          map[string]*Application   // leaf only: applications with a pending resource
 	appPriorities        map[string]int32          // cached priorities for application
 	reservedApps         map[string]int            // applications reserved within this queue, with reservation count
 	parent               *Queue                    // link back to the parent in the scheduler
@@ -106,6 +107,7 @@ func newBlankQueue() *Queue {
 		children:                 make(map[string]*Queue),
 		childPriorities:          make(map[string]int32),
 		applications:             make(map[string]*Application),
+		pendingApps:              make(map[string]*Application),
 		appPriorities:            make(map[string]int32),
 		reservedApps:             make(map[string]int),
 		allocatingAcceptedApps:   make(map[string]bool),
@@ -1046,14 +1048,25 @@ func (sq *Queue) decPendingResource(delta *resources.Resource) {
 }
 
 // AddApplication adds the application to the queue. All checks are assumed to have passed before we get here.
-// No update of pending resource is needed as it should not have any requests yet.
 // Replaces the existing application without further checks.
 func (sq *Queue) AddApplication(app *Application) {
-	sq.Lock()
-	defer sq.Unlock()
 	appID := app.ApplicationID
+	sq.Lock()
+	// drop a stale entry left behind by a different object with the same ID
+	if sq.applications[appID] != app {
+		delete(sq.pendingApps, appID)
+		if len(sq.pendingApps) == 0 {
+			sq.pendingApps = make(map[string]*Application)
+		}
+	}
 	sq.applications[appID] = app
 	sq.queueEvents.SendNewApplicationEvent(sq.QueuePath, appID)
+	sq.Unlock()
+	// an app can be attached with asks already added; seeded outside the queue lock as reading the
+	// pending resource takes the app lock. Add only: a concurrent flip to zero must not be undone.
+	if resources.StrictlyGreaterThanZero(app.GetPendingResource()) {
+		sq.setAppPending(app, true)
+	}
 }
 
 // RemoveApplication removes the app from the list of tracked applications. Make sure that the app
@@ -1101,6 +1114,10 @@ func (sq *Queue) RemoveApplication(app *Application) {
 
 	sq.Lock()
 	delete(sq.applications, appID)
+	delete(sq.pendingApps, appID)
+	if len(sq.pendingApps) == 0 {
+		sq.pendingApps = make(map[string]*Application)
+	}
 	delete(sq.appPriorities, appID)
 	priority := sq.recalculatePriority()
 	sq.Unlock()
@@ -1120,6 +1137,32 @@ func (sq *Queue) appExists(appID string) bool {
 
 	_, ok := sq.applications[appID]
 	return ok
+}
+
+// setAppPending adds or removes the application in the set of applications with a pending resource.
+// Must only be called while holding the application lock: it keeps the App -> Queue lock order and
+// serialises one application's flips, flips landing out of order would lose a member. The add-only
+// seed in AddApplication is the exception, it cannot lose a member.
+func (sq *Queue) setAppPending(app *Application, pending bool) {
+	if sq == nil {
+		return
+	}
+	sq.Lock()
+	defer sq.Unlock()
+	appID := app.ApplicationID
+	// a different object, or none, holds this ID: the set must keep tracking that object
+	if sq.applications[appID] != app {
+		return
+	}
+	if pending {
+		sq.pendingApps[appID] = app
+	} else {
+		delete(sq.pendingApps, appID)
+		// re-made when empty so the map does not keep the capacity of a burst
+		if len(sq.pendingApps) == 0 {
+			sq.pendingApps = make(map[string]*Application)
+		}
+	}
 }
 
 // GetCopyOfApps gets a shallow copy of all non-completed apps holding the lock
@@ -1465,14 +1508,17 @@ func (sq *Queue) IsPrioritySortEnabled() bool {
 // sortApplications returns a sorted shallow copy of the applications in the queue.
 // Applications are sorted using the sorting type of the queue.
 // Only applications with a pending resource request are considered.
-// Lock free call all locks are taken when needed in called functions
+// Lock free call, the queue read lock and any other lock are taken when needed
 // If withPlaceholdersOnly is true, then only applications with at least one placeholder allocation are considered.
 func (sq *Queue) sortApplications(withPlaceholdersOnly bool) []*Application {
 	if !sq.IsLeafQueue() {
 		return nil
 	}
 
-	apps := sq.GetCopyOfApps()
+	sq.RLock()
+	apps := make(map[string]*Application, len(sq.pendingApps))
+	maps.Copy(apps, sq.pendingApps)
+	sq.RUnlock()
 	if withPlaceholdersOnly {
 		for key, app := range apps {
 			if !app.HasPlaceholderAllocation() {

@@ -637,6 +637,17 @@ func (sa *Application) GetPlaceholderAsk() *resources.Resource {
 	return sa.placeholderAsk
 }
 
+// setPending replaces the pending resource and tells the queue when the application starts or stops
+// having a pending resource.
+// Must only be called while holding the application lock.
+func (sa *Application) setPending(pending *resources.Resource) {
+	was := resources.StrictlyGreaterThanZero(sa.pending)
+	sa.pending = pending
+	if now := resources.StrictlyGreaterThanZero(pending); now != was {
+		sa.queue.setAppPending(sa, now)
+	}
+}
+
 // Return the pending resources for this application
 func (sa *Application) GetPendingResource() *resources.Resource {
 	sa.RLock()
@@ -672,7 +683,7 @@ func (sa *Application) removeAsksInternal(allocKey string, detail si.EventRecord
 		sa.queue.UnReserve(sa.ApplicationID, toRelease)
 		// Cleanup total pending resource
 		deltaPendingResource = sa.pending
-		sa.pending = resources.NewResource()
+		sa.setPending(resources.NewResource())
 		for _, ask := range sa.requests {
 			sa.appEvents.SendRemoveAskEvent(sa.ApplicationID, ask.allocationKey, ask.GetAllocatedResource(), detail)
 		}
@@ -692,8 +703,9 @@ func (sa *Application) removeAsksInternal(allocKey string, detail si.EventRecord
 		if ask := sa.requests[allocKey]; ask != nil {
 			if !ask.IsAllocated() {
 				deltaPendingResource = ask.GetAllocatedResource()
-				sa.pending = resources.Sub(sa.pending, deltaPendingResource)
-				sa.pending.Prune()
+				newPending := resources.Sub(sa.pending, deltaPendingResource)
+				newPending.Prune()
+				sa.setPending(newPending)
 				// the removed ask was pending: drop it from the priority histogram and from
 				// sortedRequests. An allocated ask needs neither: it left the slice at allocateAsk
 				// time, so scanning for it here would only ever be a guaranteed full-slice miss.
@@ -763,8 +775,9 @@ func (sa *Application) AddAllocationAsk(ask *Allocation) error {
 	sa.addAllocationAskInternal(ask)
 
 	// Update total pending resource
-	sa.pending = resources.Add(sa.pending, delta)
-	sa.pending.Prune()
+	newPending := resources.Add(sa.pending, delta)
+	newPending.Prune()
+	sa.setPending(newPending)
 	sa.queue.incPendingResource(delta)
 
 	log.Log(log.SchedApplication).Info("ask added successfully to application",
@@ -822,8 +835,9 @@ func (sa *Application) UpdateAllocationResources(alloc *Allocation, isQuotaPreem
 			zap.Stringer("delta", delta))
 	} else {
 		// update pending resources
-		sa.pending = resources.Add(sa.pending, delta)
-		sa.pending.Prune()
+		newPending := resources.Add(sa.pending, delta)
+		newPending.Prune()
+		sa.setPending(newPending)
 		sa.queue.incPendingResource(delta)
 		log.Log(log.SchedApplication).Info("updated pending resources for application",
 			zap.String("appID", sa.ApplicationID),
@@ -1023,8 +1037,9 @@ func (sa *Application) allocateAsk(ask *Allocation) (*resources.Resource, error)
 	sa.sortedRequests.remove(ask)
 
 	delta := ask.GetAllocatedResource()
-	sa.pending = resources.Sub(sa.pending, delta)
-	sa.pending.Prune()
+	newPending := resources.Sub(sa.pending, delta)
+	newPending.Prune()
+	sa.setPending(newPending)
 	// update the pending of the queue with the same delta
 	sa.queue.decPendingResource(delta)
 
@@ -1055,7 +1070,7 @@ func (sa *Application) deallocateAsk(ask *Allocation) (*resources.Resource, erro
 	}
 
 	delta := ask.GetAllocatedResource()
-	sa.pending = resources.Add(sa.pending, delta)
+	sa.setPending(resources.Add(sa.pending, delta))
 	// update the pending of the queue with the same delta
 	sa.queue.incPendingResource(delta)
 

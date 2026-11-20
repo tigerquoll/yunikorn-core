@@ -21,6 +21,9 @@ package objects
 import (
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"math"
 	"strings"
 	"testing"
@@ -5447,4 +5450,50 @@ func TestCancelMatchingReservations(t *testing.T) {
 	})
 	assert.Equal(t, released, 0)
 	assert.Equal(t, remaining, 0)
+}
+
+// TestPendingAssignedOnlyInSetPending is a tripwire, not a proof: setPending is what keeps the
+// queue's set of applications with pending resources in step, so nothing else in application.go may
+// write sa.pending. Writes through the pointer GetPendingResource hands out stay invisible to it.
+func TestPendingAssignedOnlyInSetPending(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "application.go", nil, 0)
+	assert.NilError(t, err, "failed to parse application.go")
+
+	// the pointer receiver methods of resources.Resource that write to the receiver
+	mutators := map[string]bool{"AddTo": true, "SubFrom": true, "MultiplyTo": true, "Prune": true}
+	touchesPending := func(expr ast.Expr) bool {
+		found := false
+		ast.Inspect(expr, func(n ast.Node) bool {
+			if sel, ok := n.(*ast.SelectorExpr); ok && sel.Sel.Name == "pending" {
+				found = true
+			}
+			return !found
+		})
+		return found
+	}
+
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Body == nil || fn.Name.Name == "setPending" {
+			continue
+		}
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			switch node := n.(type) {
+			case *ast.AssignStmt:
+				for _, lhs := range node.Lhs {
+					assert.Assert(t, !touchesPending(lhs), "%s assigns pending at %s, only setPending may", fn.Name.Name, fset.Position(lhs.Pos()))
+				}
+			case *ast.UnaryExpr:
+				if node.Op == token.AND {
+					assert.Assert(t, !touchesPending(node.X), "%s takes the address of pending at %s", fn.Name.Name, fset.Position(node.Pos()))
+				}
+			case *ast.CallExpr:
+				if sel, selOk := node.Fun.(*ast.SelectorExpr); selOk && mutators[sel.Sel.Name] {
+					assert.Assert(t, !touchesPending(sel.X), "%s calls %s on pending at %s", fn.Name.Name, sel.Sel.Name, fset.Position(node.Pos()))
+				}
+			}
+			return true
+		})
+	}
 }
