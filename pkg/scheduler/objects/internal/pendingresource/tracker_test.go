@@ -16,7 +16,7 @@
  limitations under the License.
 */
 
-package pendingres
+package pendingresource
 
 import (
 	"testing"

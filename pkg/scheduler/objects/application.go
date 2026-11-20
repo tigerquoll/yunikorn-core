@@ -43,7 +43,7 @@ import (
 	"github.com/apache/yunikorn-core/pkg/metrics"
 	"github.com/apache/yunikorn-core/pkg/rmproxy/rmevent"
 	schedEvt "github.com/apache/yunikorn-core/pkg/scheduler/objects/events"
-	"github.com/apache/yunikorn-core/pkg/scheduler/objects/internal/pendingres"
+	"github.com/apache/yunikorn-core/pkg/scheduler/objects/internal/pendingresource"
 	"github.com/apache/yunikorn-core/pkg/scheduler/ugm"
 	siCommon "github.com/apache/yunikorn-scheduler-interface/lib/go/common"
 	"github.com/apache/yunikorn-scheduler-interface/lib/go/si"
@@ -91,14 +91,14 @@ type Application struct {
 
 	// Private mutable fields need protection
 	queuePath         string
-	queue             *Queue                  // queue the application is running in
-	pending           *pendingres.Tracker     // pending resources from asks; changes notify the queue's pending set
-	reservations      map[string]*reservation // a map of reservations
-	requests          map[string]*Allocation  // a map of allocations, pending or satisfied
-	sortedRequests    sortedRequests          // pending asks only, sorted by priority then age
-	user              security.UserGroup      // owner of the application
-	allocatedResource *resources.Resource     // total allocated resources
-	submissionTime    time.Time               // time application was submitted (based on the first ask)
+	queue             *Queue                   // queue the application is running in
+	pending           *pendingresource.Tracker // pending resources from asks; changes notify the queue's pending set
+	reservations      map[string]*reservation  // a map of reservations
+	requests          map[string]*Allocation   // a map of allocations, pending or satisfied
+	sortedRequests    sortedRequests           // pending asks only, sorted by priority then age
+	user              security.UserGroup       // owner of the application
+	allocatedResource *resources.Resource      // total allocated resources
+	submissionTime    time.Time                // time application was submitted (based on the first ask)
 
 	usedResource        *resources.TrackedResource // keep track of resource usage of the application
 	preemptedResource   *resources.TrackedResource // keep track of preempted resource usage of the application
@@ -165,7 +165,7 @@ func NewApplication(siApp *si.AddApplicationRequest, ugi security.UserGroup, eve
 		runnableByUserLimit:   true,
 		runnableInQueue:       true,
 	}
-	app.pending = pendingres.New(func(has bool) { app.queue.setAppPending(app, has) })
+	app.pending = pendingresource.New(func(has bool) { app.queue.setAppPending(app, has) })
 	placeholderTimeout := common.ConvertSITimeoutWithAdjustment(siApp, defaultPlaceholderTimeout)
 	gangSchedStyle := siApp.GetGangSchedulingStyle()
 	if gangSchedStyle != Soft && gangSchedStyle != Hard {

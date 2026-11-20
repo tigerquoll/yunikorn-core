@@ -16,7 +16,7 @@
  limitations under the License.
 */
 
-package pendingres
+package pendingresource
 
 import (
 	"github.com/apache/yunikorn-core/pkg/common/resources"
@@ -32,7 +32,7 @@ type Tracker struct {
 
 func New(onChange func(hasPending bool)) *Tracker {
 	if onChange == nil {
-		panic("pendingres: onChange must not be nil")
+		panic("pendingresource: onChange must not be nil")
 	}
 	return &Tracker{
 		res:      resources.NewResource(),
