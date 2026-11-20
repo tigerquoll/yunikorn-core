@@ -1062,7 +1062,7 @@ func (sq *Queue) AddApplication(app *Application) {
 	sq.applications[appID] = app
 	sq.queueEvents.SendNewApplicationEvent(sq.QueuePath, appID)
 	sq.Unlock()
-	// seeded outside the queue lock as reading pending takes the app lock, add only: a stale entry is
+	// seeded outside the queue lock as reading pending takes the app lock; add only: a stale entry is
 	// dropped by the sort filter, a missing one would never be scheduled
 	if resources.StrictlyGreaterThanZero(app.GetPendingResource()) {
 		sq.setAppPending(app, true)
