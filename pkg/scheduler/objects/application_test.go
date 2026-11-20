@@ -5452,9 +5452,7 @@ func TestCancelMatchingReservations(t *testing.T) {
 	assert.Equal(t, remaining, 0)
 }
 
-// TestPendingAssignedOnlyInSetPending is a tripwire, not a proof: setPending is what keeps the
-// queue's set of applications with pending resources in step, so nothing else in application.go may
-// write sa.pending. Writes through the pointer GetPendingResource hands out stay invisible to it.
+// TestPendingAssignedOnlyInSetPending is a tripwire: only setPending may write sa.pending, as it keeps the queue's pendingApps in step.
 func TestPendingAssignedOnlyInSetPending(t *testing.T) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "application.go", nil, 0)
@@ -5484,6 +5482,8 @@ func TestPendingAssignedOnlyInSetPending(t *testing.T) {
 				for _, lhs := range node.Lhs {
 					assert.Assert(t, !touchesPending(lhs), "%s assigns pending at %s, only setPending may", fn.Name.Name, fset.Position(lhs.Pos()))
 				}
+			case *ast.IncDecStmt:
+				assert.Assert(t, !touchesPending(node.X), "%s assigns pending at %s, only setPending may", fn.Name.Name, fset.Position(node.Pos()))
 			case *ast.UnaryExpr:
 				if node.Op == token.AND {
 					assert.Assert(t, !touchesPending(node.X), "%s takes the address of pending at %s", fn.Name.Name, fset.Position(node.Pos()))
@@ -5491,6 +5491,9 @@ func TestPendingAssignedOnlyInSetPending(t *testing.T) {
 			case *ast.CallExpr:
 				if sel, selOk := node.Fun.(*ast.SelectorExpr); selOk && mutators[sel.Sel.Name] {
 					assert.Assert(t, !touchesPending(sel.X), "%s calls %s on pending at %s", fn.Name.Name, sel.Sel.Name, fset.Position(node.Pos()))
+				}
+				if fun, funOk := node.Fun.(*ast.Ident); funOk && fun.Name == "delete" && len(node.Args) > 0 {
+					assert.Assert(t, !touchesPending(node.Args[0]), "%s deletes from pending at %s", fn.Name.Name, fset.Position(node.Pos()))
 				}
 			}
 			return true

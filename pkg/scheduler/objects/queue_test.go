@@ -789,11 +789,12 @@ func TestQueuePendingApps(t *testing.T) {
 	_, ok := leaf.pendingApps[appID2]
 	assert.Assert(t, !ok, "attached app without pending resources is a member")
 
-	before := reflect.ValueOf(leaf.pendingApps).Pointer()
+	// the old map is kept alive by this reference: a freed one could have its address reused
+	before := leaf.pendingApps
 	_, err = app1.AllocateAsk("alloc-1")
 	assert.NilError(t, err, "failed to allocate ask")
 	assert.Equal(t, len(leaf.pendingApps), 0, "app without a pending ask left in the set")
-	assert.Assert(t, reflect.ValueOf(leaf.pendingApps).Pointer() != before, "emptied set kept its map")
+	assert.Assert(t, reflect.ValueOf(leaf.pendingApps).Pointer() != reflect.ValueOf(before).Pointer(), "emptied set kept its map")
 
 	err = app1.AddAllocationAsk(newAllocationAsk("alloc-2", appID1, res))
 	assert.NilError(t, err, "failed to add allocation ask")
@@ -803,6 +804,8 @@ func TestQueuePendingApps(t *testing.T) {
 	assert.Assert(t, !ok, "removed app left in the set")
 
 	// the removed object still points at the queue: its flips must not resurrect the entry
+	app1.RemoveAllocationAsk("alloc-2")
+	assert.Assert(t, !resources.StrictlyGreaterThanZero(app1.GetPendingResource()), "removed app must have nothing pending for the next ask to flip it")
 	err = app1.AddAllocationAsk(newAllocationAsk("alloc-3", appID1, res))
 	assert.NilError(t, err, "failed to add allocation ask")
 	_, ok = leaf.pendingApps[appID1]
@@ -817,9 +820,7 @@ func TestQueuePendingApps(t *testing.T) {
 	assert.Assert(t, !ok, "entry of the replaced app object left in the set")
 }
 
-// TestQueuePendingAppsConcurrent asserts the one way invariant the scheduler depends on: an
-// application with pending resources is never missing from the set. Extra members are harmless, the
-// sort filters them out.
+// TestQueuePendingAppsConcurrent checks that no application with pending resources is missing from the set.
 func TestQueuePendingAppsConcurrent(t *testing.T) {
 	root, err := createRootQueue(nil)
 	assert.NilError(t, err, "queue create failed")
@@ -844,6 +845,10 @@ func TestQueuePendingAppsConcurrent(t *testing.T) {
 			key := fmt.Sprintf("%s-%d", tag, i)
 			if askErr := app.AddAllocationAsk(newAllocationAsk(key, app.ApplicationID, res)); askErr != nil {
 				continue
+			}
+			// the last ask stays pending so the end state is not vacuous
+			if i == rounds-1 {
+				break
 			}
 			if _, allocErr := app.AllocateAsk(key); allocErr == nil {
 				_, _ = app.DeallocateAsk(key) //nolint:errcheck // the remove below cleans up either way
@@ -900,11 +905,14 @@ func TestQueuePendingAppsConcurrent(t *testing.T) {
 	for id, app := range members {
 		assert.Assert(t, tracked[id] == app, "member %s is not the application the queue tracks", id)
 	}
+	withPending := 0
 	for id, app := range tracked {
 		if resources.StrictlyGreaterThanZero(app.GetPendingResource()) {
+			withPending++
 			assert.Assert(t, members[id] == app, "application %s with pending resources is missing from the set", id)
 		}
 	}
+	assert.Assert(t, withPending > 0, "no application ended with pending resources: the membership check asserted nothing")
 }
 
 func TestSortAppsWithPlaceholderAllocations(t *testing.T) {

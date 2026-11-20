@@ -1053,7 +1053,7 @@ func (sq *Queue) AddApplication(app *Application) {
 	appID := app.ApplicationID
 	sq.Lock()
 	// drop a stale entry left behind by a different object with the same ID
-	if sq.applications[appID] != app {
+	if _, ok := sq.pendingApps[appID]; ok && sq.applications[appID] != app {
 		delete(sq.pendingApps, appID)
 		if len(sq.pendingApps) == 0 {
 			sq.pendingApps = make(map[string]*Application)
@@ -1062,8 +1062,8 @@ func (sq *Queue) AddApplication(app *Application) {
 	sq.applications[appID] = app
 	sq.queueEvents.SendNewApplicationEvent(sq.QueuePath, appID)
 	sq.Unlock()
-	// an app can be attached with asks already added; seeded outside the queue lock as reading the
-	// pending resource takes the app lock. Add only: a concurrent flip to zero must not be undone.
+	// seeded outside the queue lock as reading pending takes the app lock, add only: a stale entry is
+	// dropped by the sort filter, a missing one would never be scheduled
 	if resources.StrictlyGreaterThanZero(app.GetPendingResource()) {
 		sq.setAppPending(app, true)
 	}
@@ -1114,9 +1114,11 @@ func (sq *Queue) RemoveApplication(app *Application) {
 
 	sq.Lock()
 	delete(sq.applications, appID)
-	delete(sq.pendingApps, appID)
-	if len(sq.pendingApps) == 0 {
-		sq.pendingApps = make(map[string]*Application)
+	if _, ok := sq.pendingApps[appID]; ok {
+		delete(sq.pendingApps, appID)
+		if len(sq.pendingApps) == 0 {
+			sq.pendingApps = make(map[string]*Application)
+		}
 	}
 	delete(sq.appPriorities, appID)
 	priority := sq.recalculatePriority()
@@ -1140,9 +1142,8 @@ func (sq *Queue) appExists(appID string) bool {
 }
 
 // setAppPending adds or removes the application in the set of applications with a pending resource.
-// Must only be called while holding the application lock: it keeps the App -> Queue lock order and
-// serialises one application's flips, flips landing out of order would lose a member. The add-only
-// seed in AddApplication is the exception, it cannot lose a member.
+// Only call holding the application write lock: it keeps App -> Queue order and stops two flips of one
+// application landing out of order. The add-only seed in AddApplication is safe without it.
 func (sq *Queue) setAppPending(app *Application, pending bool) {
 	if sq == nil {
 		return
@@ -1150,13 +1151,13 @@ func (sq *Queue) setAppPending(app *Application, pending bool) {
 	sq.Lock()
 	defer sq.Unlock()
 	appID := app.ApplicationID
-	// a different object, or none, holds this ID: the set must keep tracking that object
+	// only the object the queue tracks under this ID may change its entry
 	if sq.applications[appID] != app {
 		return
 	}
 	if pending {
 		sq.pendingApps[appID] = app
-	} else {
+	} else if _, ok := sq.pendingApps[appID]; ok {
 		delete(sq.pendingApps, appID)
 		// re-made when empty so the map does not keep the capacity of a burst
 		if len(sq.pendingApps) == 0 {
@@ -1508,7 +1509,7 @@ func (sq *Queue) IsPrioritySortEnabled() bool {
 // sortApplications returns a sorted shallow copy of the applications in the queue.
 // Applications are sorted using the sorting type of the queue.
 // Only applications with a pending resource request are considered.
-// Lock free call, the queue read lock and any other lock are taken when needed
+// Lock free call: takes every lock it needs.
 // If withPlaceholdersOnly is true, then only applications with at least one placeholder allocation are considered.
 func (sq *Queue) sortApplications(withPlaceholdersOnly bool) []*Application {
 	if !sq.IsLeafQueue() {

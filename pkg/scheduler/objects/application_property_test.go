@@ -277,8 +277,7 @@ func runPropertyFuzz(t *testing.T, seed int64) int { //nolint:funlen
 					}
 				}
 			default:
-				// UpdateAllocationResources on the lowest pending key: the only caller of the pending
-				// write that no other case reaches. Picked without an rng draw to keep the step stream.
+				// UpdateAllocationResources on the lowest pending key, picked without an rng draw to keep the step stream.
 				lowest := ""
 				for k := range pendingKeys {
 					if lowest == "" || k < lowest {
@@ -550,8 +549,7 @@ func snapshotAddState(app *Application, taskGroup string) (*resources.Resource, 
 // in the message so the failure is reproducible via `go test -run .../seed-<seed>`.
 // It returns the number of distinct pending priorities observed this step, so the caller can track
 // coverage high-water marks without a second pass over pendingKeys.
-// The leaf's set of applications with a pending resource is held to exact equality rather than to
-// the one-way invariant: one goroutine, no seeding race and the application never leaves the leaf.
+// pendingApps membership is held to equality: one goroutine, and the application never leaves the leaf.
 func assertFuzzInvariants(t *testing.T, app *Application, leaf *Queue, keyPriority map[string]int32, pendingKeys map[string]bool, seed int64, step int) int {
 	t.Helper()
 

@@ -639,7 +639,7 @@ func (sa *Application) GetPlaceholderAsk() *resources.Resource {
 
 // setPending replaces the pending resource and tells the queue when the application starts or stops
 // having a pending resource.
-// Must only be called while holding the application lock.
+// Must only be called while holding the application write lock.
 func (sa *Application) setPending(pending *resources.Resource) {
 	was := resources.StrictlyGreaterThanZero(sa.pending)
 	sa.pending = pending
