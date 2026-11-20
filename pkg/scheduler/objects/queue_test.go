@@ -596,7 +596,7 @@ func TestAddApplication(t *testing.T) {
 			siCommon.Memory: 10,
 		})
 	app := newApplication(appID1, "default", "root.parent.leaf")
-	app.pending = pending
+	setTestPending(app, pending)
 	// adding the app must not update pending resources
 	leaf.AddApplication(app)
 	assert.Equal(t, len(leaf.applications), 1, "Application was not added to the queue as expected")
@@ -633,7 +633,7 @@ func TestRemoveApplication(t *testing.T) {
 
 	// try the same again now with pending resources set
 	res := resources.NewResourceFromMap(map[string]resources.Quantity{"first": 10})
-	app.pending.AddTo(res)
+	setTestPending(app, res)
 	leaf.AddApplication(app)
 	assert.Equal(t, len(leaf.applications), 1, "Application was not added to the queue as expected")
 	assert.Assert(t, resources.IsZero(leaf.pending), "leaf queue pending resource not zero")
@@ -645,7 +645,7 @@ func TestRemoveApplication(t *testing.T) {
 	assert.Assert(t, resources.IsZero(root.pending), "root queue pending resource not updated correctly")
 
 	app.allocatedResource.AddTo(res)
-	app.pending = resources.NewResource()
+	setTestPending(app, resources.NewResource())
 	leaf.AddApplication(app)
 	assert.Equal(t, len(leaf.applications), 1, "Application was not added to the queue as expected")
 	assert.Assert(t, resources.IsZero(leaf.allocatedResource), "leaf queue allocated resource not zero")
@@ -2464,7 +2464,7 @@ func TestFindQueueByAppID(t *testing.T) {
 	assert.NilError(t, err, "failed to create queue")
 
 	app := newApplication(appID1, "default", "root.parent.leaf")
-	app.pending = resources.NewResourceFromMap(map[string]resources.Quantity{siCommon.Memory: 10})
+	setTestPending(app, resources.NewResourceFromMap(map[string]resources.Quantity{siCommon.Memory: 10}))
 	leaf1.AddApplication(app)
 	appQueueMapping.AddAppQueueMapping(appID1, leaf1)
 
@@ -2513,7 +2513,7 @@ func TestFindEligiblePreemptionVictims(t *testing.T) {
 
 	// add two lower-priority allocs in leaf2
 	app2 := newApplication(appID2, "default", "root.parent.leaf")
-	app2.pending = res
+	setTestPending(app2, res)
 	leaf2.AddApplication(app2)
 	app2.SetQueue(leaf2)
 	err = app2.AddAllocationAsk(ask2)

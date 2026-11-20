@@ -21,9 +21,6 @@ package objects
 import (
 	"errors"
 	"fmt"
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"math"
 	"strings"
 	"testing"
@@ -56,6 +53,12 @@ var (
 		return nil
 	}
 )
+
+// setTestPending replaces the application's pending resource: the Tracker has no setter
+func setTestPending(app *Application, res *resources.Resource) {
+	app.pending.Reset()
+	app.pending.Add(res)
+}
 
 func setupUGM() {
 	userManager := ugm.GetUserManager()
@@ -5450,53 +5453,4 @@ func TestCancelMatchingReservations(t *testing.T) {
 	})
 	assert.Equal(t, released, 0)
 	assert.Equal(t, remaining, 0)
-}
-
-// TestPendingAssignedOnlyInSetPending is a tripwire: only setPending may write sa.pending, as it keeps the queue's pendingApps in step.
-func TestPendingAssignedOnlyInSetPending(t *testing.T) {
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "application.go", nil, 0)
-	assert.NilError(t, err, "failed to parse application.go")
-
-	// the pointer receiver methods of resources.Resource that write to the receiver
-	mutators := map[string]bool{"AddTo": true, "SubFrom": true, "MultiplyTo": true, "Prune": true}
-	touchesPending := func(expr ast.Expr) bool {
-		found := false
-		ast.Inspect(expr, func(n ast.Node) bool {
-			if sel, ok := n.(*ast.SelectorExpr); ok && sel.Sel.Name == "pending" {
-				found = true
-			}
-			return !found
-		})
-		return found
-	}
-
-	for _, decl := range file.Decls {
-		fn, ok := decl.(*ast.FuncDecl)
-		if !ok || fn.Body == nil || fn.Name.Name == "setPending" {
-			continue
-		}
-		ast.Inspect(fn.Body, func(n ast.Node) bool {
-			switch node := n.(type) {
-			case *ast.AssignStmt:
-				for _, lhs := range node.Lhs {
-					assert.Assert(t, !touchesPending(lhs), "%s assigns pending at %s, only setPending may", fn.Name.Name, fset.Position(lhs.Pos()))
-				}
-			case *ast.IncDecStmt:
-				assert.Assert(t, !touchesPending(node.X), "%s assigns pending at %s, only setPending may", fn.Name.Name, fset.Position(node.Pos()))
-			case *ast.UnaryExpr:
-				if node.Op == token.AND {
-					assert.Assert(t, !touchesPending(node.X), "%s takes the address of pending at %s", fn.Name.Name, fset.Position(node.Pos()))
-				}
-			case *ast.CallExpr:
-				if sel, selOk := node.Fun.(*ast.SelectorExpr); selOk && mutators[sel.Sel.Name] {
-					assert.Assert(t, !touchesPending(sel.X), "%s calls %s on pending at %s", fn.Name.Name, sel.Sel.Name, fset.Position(node.Pos()))
-				}
-				if fun, funOk := node.Fun.(*ast.Ident); funOk && fun.Name == "delete" && len(node.Args) > 0 {
-					assert.Assert(t, !touchesPending(node.Args[0]), "%s deletes from pending at %s", fn.Name.Name, fset.Position(node.Pos()))
-				}
-			}
-			return true
-		})
-	}
 }

@@ -1064,7 +1064,7 @@ func (sq *Queue) AddApplication(app *Application) {
 	sq.Unlock()
 	// seeded outside the queue lock as reading pending takes the app lock; add only: a stale entry is
 	// dropped by the sort filter, a missing one would never be scheduled
-	if resources.StrictlyGreaterThanZero(app.GetPendingResource()) {
+	if app.HasPendingResource() {
 		sq.setAppPending(app, true)
 	}
 }
