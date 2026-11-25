@@ -1303,6 +1303,7 @@ func (pc *PartitionContext) cleanupExpiredApps() {
 	for _, appID := range pc.getAppsByState(objects.Expired.String()) {
 		pc.Lock()
 		delete(pc.applications, appID)
+		pc.appQueueMapping.RemoveAppQueueMapping(appID)
 		pc.Unlock()
 	}
 	for _, appID := range pc.getRejectedAppsByState(objects.Expired.String()) {
@@ -1351,13 +1352,6 @@ func (pc *PartitionContext) UpdateAllocation(alloc *objects.Allocation) (bool, b
 		return pc.handleForeignAllocation(allocationKey, applicationID, nodeID, node, alloc)
 	}
 
-	// find application, reviving it if the shim sent work after the core completed it
-	app := pc.getOrReviveApplication(applicationID)
-	if app == nil {
-		metrics.GetSchedulerMetrics().IncSchedulingError()
-		return false, false, fmt.Errorf("failed to find application %s", applicationID)
-	}
-
 	// find node if one is specified
 	allocated := alloc.IsAllocated()
 	if allocated {
@@ -1375,6 +1369,13 @@ func (pc *PartitionContext) UpdateAllocation(alloc *objects.Allocation) (bool, b
 	if !resources.StrictlyGreaterThanZero(res) {
 		metrics.GetSchedulerMetrics().IncSchedulingError()
 		return false, false, fmt.Errorf("allocation contains negative resources")
+	}
+
+	// Validate incoming work before lookup: reviving an application restores ownership and its queue.
+	app := pc.getOrReviveApplication(applicationID)
+	if app == nil {
+		metrics.GetSchedulerMetrics().IncSchedulingError()
+		return false, false, fmt.Errorf("failed to find application %s", applicationID)
 	}
 
 	// check to see if allocation exists already on app
@@ -1953,6 +1954,8 @@ func (pc *PartitionContext) moveTerminatedApp(appID string) {
 		return
 	}
 	delete(pc.applications, appID)
+	// only active applications need the mapping, a revival adds it back in resolveRevivedQueue
+	pc.appQueueMapping.RemoveAppQueueMapping(appID)
 	pc.completedApplications[newID] = app
 }
 
